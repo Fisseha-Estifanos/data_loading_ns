@@ -17,6 +17,7 @@ export NS_TOKEN_SECRET="your_token_secret"
 export NS_REALM="4874529-sb3"
 ```
 
+
 Or edit `config.py` directly.
 
 ### Data Files
@@ -76,11 +77,11 @@ The loader is **idempotent**. On re-run:
 
 For every record created:
 
-| Tier | Method | When |
-|------|--------|------|
-| 1 | Parse `Location` header from 204 response | Always tried first |
-| 2 | `GET /record/v1/{type}/eid:{externalId}` | If Tier 1 fails |
-| 3 | SuiteQL query by business key | If Tier 2 fails |
+| Tier | Method                                    | When               |
+| ---- | ----------------------------------------- | ------------------ |
+| 1    | Parse `Location` header from 204 response | Always tried first |
+| 2    | `GET /record/v1/{type}/eid:{externalId}`  | If Tier 1 fails    |
+| 3    | SuiteQL query by business key             | If Tier 2 fails    |
 
 Records created but with unresolved IDs get status `success_no_id` for manual review.
 
@@ -90,13 +91,13 @@ Records created but with unresolved IDs get status `success_no_id` for manual re
 
 SQLite database at `state/load_state.db`:
 
-| Column | Purpose |
-|--------|---------|
-| entity_type | customer, billingAccount, subscription, oneOff |
-| external_id | Your external ID (e.g. MP_HubSpot_xxx) |
-| netsuite_id | NS internal ID (once resolved) |
-| status | pending / success / success_no_id / failed |
-| error_message | API error details on failure |
+| Column        | Purpose                                        |
+| ------------- | ---------------------------------------------- |
+| entity_type   | customer, billingAccount, subscription, oneOff |
+| external_id   | Your external ID (e.g. MP_HubSpot_xxx)         |
+| netsuite_id   | NS internal ID (once resolved)                 |
+| status        | pending / success / success_no_id / failed     |
+| error_message | API error details on failure                   |
 
 ---
 
