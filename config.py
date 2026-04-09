@@ -4,12 +4,16 @@ NetSuite REST API Configuration
 Fill in your OAuth 1.0 credentials below.
 All secrets should ideally come from environment variables in production.
 """
+
 import os
 
 # --- NetSuite Account ---
+# FROM POSTMAN: https://4874529-sb3.suitetalk.api.netsuite.com/services/rest/record/v1/customer
 ACCOUNT_ID = "4874529-sb3"
 BASE_URL = f"https://{ACCOUNT_ID}.suitetalk.api.netsuite.com/services/rest/record/v1"
-SUITEQL_URL = f"https://{ACCOUNT_ID}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
+SUITEQL_URL = (
+    f"https://{ACCOUNT_ID}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
+)
 
 # --- OAuth 1.0 Credentials ---
 # Replace these with your actual values, or set them as environment variables.
