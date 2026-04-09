@@ -37,15 +37,9 @@ if _PROJECT_ROOT not in sys.path:
 import config
 from netsuite_client import NetSuiteClient
 from state_tracker import StateTracker
-from loaders import (
-    CustomerLoader,
-    BillingAccountLoader,
-    SubscriptionLoader,
-    OneOffLoader,
-)
+from loaders import CustomerLoader, BillingAccountLoader, SubscriptionLoader, OneOffLoader
 
 # ─── Logging Setup ──────────────────────────────────────────────────────
-
 
 def setup_logging(log_dir: str = "logs"):
     os.makedirs(log_dir, exist_ok=True)
@@ -84,7 +78,6 @@ LOADER_MAP = {
 
 # ─── Preflight Checks ──────────────────────────────────────────────────
 
-
 def preflight_check(client: NetSuiteClient) -> bool:
     """Verify connectivity and auth by fetching a single record."""
     logger = logging.getLogger("preflight")
@@ -97,9 +90,7 @@ def preflight_check(client: NetSuiteClient) -> bool:
             logger.info(f"✓ Preflight passed. Connected to {config.ACCOUNT_ID}")
             return True
         else:
-            logger.error(
-                f"✗ Preflight failed: HTTP {resp.status_code} — {resp.text[:300]}"
-            )
+            logger.error(f"✗ Preflight failed: HTTP {resp.status_code} — {resp.text[:300]}")
             return False
     except Exception as e:
         logger.error(f"✗ Preflight failed: {e}")
@@ -107,7 +98,6 @@ def preflight_check(client: NetSuiteClient) -> bool:
 
 
 # ─── Report ─────────────────────────────────────────────────────────────
-
 
 def print_report(tracker: StateTracker, show_failures: bool = False):
     """Print a summary of the current load state."""
@@ -150,26 +140,13 @@ def print_report(tracker: StateTracker, show_failures: bool = False):
 
 # ─── Main ───────────────────────────────────────────────────────────────
 
-
 def main():
     parser = argparse.ArgumentParser(description="NetSuite Data Loader")
-    parser.add_argument(
-        "--entity", choices=ENTITY_ORDER, help="Load only this entity type"
-    )
-    parser.add_argument(
-        "--report", action="store_true", help="Print state report without loading"
-    )
-    parser.add_argument(
-        "--failures", action="store_true", help="Include failure details in report"
-    )
-    parser.add_argument(
-        "--skip-preflight", action="store_true", help="Skip auth preflight check"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Build payloads and log them without calling the API",
-    )
+    parser.add_argument("--entity", choices=ENTITY_ORDER, help="Load only this entity type")
+    parser.add_argument("--report", action="store_true", help="Print state report without loading")
+    parser.add_argument("--failures", action="store_true", help="Include failure details in report")
+    parser.add_argument("--skip-preflight", action="store_true", help="Skip auth preflight check")
+    parser.add_argument("--dry-run", action="store_true", help="Build payloads and log them without calling the API")
     args = parser.parse_args()
 
     log_file = setup_logging()
@@ -227,9 +204,7 @@ def main():
             if args.dry_run:
                 logger.info(f"DRY RUN: preparing {entity} payloads...")
                 records = loader.prepare_records()
-                logger.info(
-                    f"DRY RUN: {len(records)} {entity} records would be created"
-                )
+                logger.info(f"DRY RUN: {len(records)} {entity} records would be created")
                 for ext_id, payload, _ in records[:3]:
                     logger.info(f"  Sample payload for {ext_id}: {str(payload)[:300]}")
                 results[entity] = {"total": len(records), "dry_run": True}
