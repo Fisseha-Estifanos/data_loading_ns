@@ -7,10 +7,11 @@
 
 ## P0 — Must fix before any API calls
 
-- [~] **Test single customer POST against sandbox**
-  - Drop CSV into `data/`, run `python main.py --entity customer --dry-run --limit 1` to inspect payload
-  - Then run `python main.py --entity customer --limit 1` and check response
-  - Fix any 400/422 field errors (addressBook structure, currency/subsidiary format, terms)
+- [x] **Test single customer POST against sandbox**
+  - Payload structure validated. Customer `MP_HubSpot_10353346261` created in NS as ID `800518`.
+  - "Already exists" recovery path working: Tier 2 GET by externalId resolves ID correctly.
+  - Auth bug fixed: OAuth realm must be `4874529_SB3` (uppercase + underscore), not `4874529-sb3`.
+  - `respond-async` removed from Prefer header — was causing silent 202 async creates.
 
 - [ ] **Resolve `terms` internal ID**
   - `loaders/customer.py` uses `{"refName": "Z030 - Payment w/in 30 days net"}` — refName may not resolve
@@ -21,16 +22,26 @@
 
 ## P1 — Required for full pipeline
 
+- [~] **Load all 68 customers**
+  - First record (`MP_HubSpot_10353346261` → NS ID `800518`) confirmed working
+  - Run: `python main.py --entity customer`
+  - Verify: `python main.py --report --failures`
+
 - [ ] **Map ~15 custom fields on Customer record**
-  - Run: `SELECT scriptid, label FROM customfield WHERE fieldtype = 'ENTITY' ORDER BY label`
-  - Fields needing `custentity_xxx` IDs:
-    - Company Reg Number, Segment ("Moorepay"), Direct Debit
-    - Business/Class ("Managed Services"), Dunning Procedure
-    - Dunning Contact First Name, Dunning Contact Last Name
-    - Dunning Level ("Level 1 and Above"), Email Preference ("PDF")
-    - Allow Letters to be Emailed, Electronic Email Recipients
-    - Indexation Date, PO Mandatory, n/a 1 (Direct Debit setup), n/a 2 (NS Account Number)
-  - Add to payload in `loaders/customer.py` as `payload["custentity_xxx"] = value`
+  - Live GET response revealed these custentity IDs already on the sandbox record:
+    - `custentity_2663_direct_debit`
+    - `custentity_3805_dunning_letters_toemail`
+    - `custentity_3805_dunning_letters_toprint`
+    - `custentity_3805_dunning_manager`
+    - `custentity6`, `custentity9`, `custentity15_2`, `custentity19`, `custentity376`
+    - `cseg_busclass` (Business/Class segment)
+  - Still need to match script IDs to CSV column labels — run:
+
+    ```sql
+    SELECT scriptid, label FROM customfield WHERE recordtype = 'ENTITY' ORDER BY label
+    ```
+
+  - Then add mapped values to `loaders/customer.py`
 
 - [ ] **Resolve subscription plan internal IDs**
   - `loaders/subscription.py` uses `{"refName": "HR Services rolling (LPG)"}` etc.
@@ -49,10 +60,6 @@
 - [ ] **Confirm one-off invoice record type**
   - Currently `RECORD_TYPE = "invoice"` in `loaders/one_off.py`
   - Verify with MoorePay NS team — may need `customSale`, `cashSale`, or a custom record
-
-- [ ] **Load all 68 customers**
-  - Once single-record test passes: `python main.py --entity customer`
-  - Verify: `python main.py --report --failures`
 
 - [ ] **Load all 100 billing accounts**
   - `python main.py --entity billingAccount`
