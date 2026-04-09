@@ -1,0 +1,2 @@
+2026-04-09 13:52:25,493 [INFO   ] root: Log file: logs/2026-04-09/load_13-52-25.log
+2026-04-09 13:52:25,493 [ERROR  ] main: Credentials not configured. Set environment variables (NS_CONSUMER_KEY, NS_CONSUMER_SECRET, NS_ACCESS_TOKEN, NS_TOKEN_SECRET) or edit config.py directly.

@@ -57,9 +57,16 @@ class BaseLoader(ABC):
 
     def read_csv(self) -> list[dict]:
         """Read the source CSV into a list of dicts."""
-        with open(self.CSV_PATH, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            return list(reader)
+        try:
+            with open(self.CSV_PATH, "r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                return list(reader)
+        except FileNotFoundError:
+            logger.error(
+                f"CSV file not found: '{self.CSV_PATH}'. "
+                "Place the export file there and retry."
+            )
+            raise
 
     # ─── Payload Hashing (change detection) ─────────────────────────────
 

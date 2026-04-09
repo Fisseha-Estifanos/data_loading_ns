@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Ensure the project root is on sys.path so imports work
@@ -49,9 +49,11 @@ from loaders import (
 
 
 def setup_logging(log_dir: str = "logs"):
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"load_{timestamp}.log")
+    gmt3 = timezone(timedelta(hours=3))
+    now = datetime.now(gmt3)
+    date_folder = os.path.join(log_dir, now.strftime("%Y-%m-%d"))
+    os.makedirs(date_folder, exist_ok=True)
+    log_file = os.path.join(date_folder, now.strftime("load_%H-%M-%S.log"))
 
     # Console: INFO and above
     # File: DEBUG and above (captures tier resolution details)
@@ -182,6 +184,15 @@ def main():
 
     log_file = setup_logging()
     logger = logging.getLogger("main")
+
+    try:
+        _run(args, logger)
+    except Exception:
+        logger.exception("Unhandled error — see traceback above")
+        sys.exit(1)
+
+
+def _run(args, logger):
 
     # Validate credentials are set
     if config.CONSUMER_KEY == "YOUR_CONSUMER_KEY":
