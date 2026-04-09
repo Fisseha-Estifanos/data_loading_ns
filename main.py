@@ -236,12 +236,14 @@ def main():
                 logger.info(f"DRY RUN: preparing {entity} payloads...")
                 records = loader.prepare_records()
                 if args.limit is not None:
-                    records = records[:args.limit]
+                    records = records[: args.limit]
                 logger.info(
                     f"DRY RUN: {len(records)} {entity} record(s) would be created"
                 )
                 for ext_id, payload, _ in records:
-                    logger.info(f"  Payload for {ext_id}:\n{json.dumps(payload, indent=2)}")
+                    logger.info(
+                        f"  Payload for {ext_id}:\n{json.dumps(payload, indent=2)}"
+                    )
                 results[entity] = {"total": len(records), "dry_run": True}
             else:
                 results[entity] = loader.load_all(limit=args.limit)

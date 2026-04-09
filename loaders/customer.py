@@ -3,6 +3,7 @@ Customer Loader
 ================
 Maps customerskleeneexport CSV → NetSuite Customer records.
 """
+
 import logging
 from typing import Optional
 
@@ -161,7 +162,9 @@ class CustomerLoader(BaseLoader):
 
         # Clean nested nulls
         address_entry["addressBookAddress"] = {
-            k: v for k, v in address_entry["addressBookAddress"].items() if v is not None
+            k: v
+            for k, v in address_entry["addressBookAddress"].items()
+            if v is not None
         }
 
         return address_entry
