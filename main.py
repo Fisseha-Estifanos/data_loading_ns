@@ -22,6 +22,7 @@ Environment variables for credentials (or edit config.py):
   NS_CONSUMER_KEY, NS_CONSUMER_SECRET, NS_ACCESS_TOKEN, NS_TOKEN_SECRET, NS_REALM
 """
 import argparse
+import json
 import logging
 import os
 import sys
@@ -170,6 +171,13 @@ def main():
         action="store_true",
         help="Build payloads and log them without calling the API",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Process only the first N records (useful for testing a single POST)",
+    )
     args = parser.parse_args()
 
     log_file = setup_logging()
@@ -227,14 +235,16 @@ def main():
             if args.dry_run:
                 logger.info(f"DRY RUN: preparing {entity} payloads...")
                 records = loader.prepare_records()
+                if args.limit is not None:
+                    records = records[:args.limit]
                 logger.info(
-                    f"DRY RUN: {len(records)} {entity} records would be created"
+                    f"DRY RUN: {len(records)} {entity} record(s) would be created"
                 )
-                for ext_id, payload, _ in records[:3]:
-                    logger.info(f"  Sample payload for {ext_id}: {str(payload)[:300]}")
+                for ext_id, payload, _ in records:
+                    logger.info(f"  Payload for {ext_id}:\n{json.dumps(payload, indent=2)}")
                 results[entity] = {"total": len(records), "dry_run": True}
             else:
-                results[entity] = loader.load_all()
+                results[entity] = loader.load_all(limit=args.limit)
 
         # Final summary
         logger.info("\n" + "=" * 50)

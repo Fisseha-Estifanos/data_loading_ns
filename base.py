@@ -70,12 +70,18 @@ class BaseLoader(ABC):
 
     # ─── Load Orchestration ─────────────────────────────────────────────
 
-    def load_all(self) -> dict:
+    def load_all(self, limit: int = None) -> dict:
         """
         Main entry point. Reads CSV, builds payloads, creates records,
         tracks state, and returns a summary.
+
+        Args:
+            limit: If set, process only the first N records (useful for testing).
         """
         records = self.prepare_records()
+        if limit is not None:
+            records = records[:limit]
+            logger.info(f"--limit {limit}: processing {len(records)} record(s)")
         run_id = self.tracker.start_run(self.ENTITY_TYPE)
 
         total = len(records)
