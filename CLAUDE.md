@@ -94,98 +94,21 @@ On re-run, records with `status=success` or `success_no_id` are automatically sk
 
 ---
 
+## Outstanding Work
+
+See **[TODO.md](TODO.md)** for the full prioritised task list (P0 → P1 → P2). Update it as tasks are completed.
+
+---
+
 ## Current Status — What Works
 
-- **All imports and module resolution**: tested, working from any working directory.
+- **All imports and module resolution**: `loaders/` package structure in place, tested.
 - **Customer loader**: builds valid payloads for all 68 records. Standard fields mapped: `externalId`, `companyName`, `isPerson`, `subsidiary`, `currency`, `email`, `phone`, `terms`, `addressBook` (with country code mapping). Sample payload validated.
 - **Billing account loader**: correctly resolves customer NS ID from state tracker. Blocks if customer not yet loaded. All 100 rows parse correctly.
 - **Subscription loader**: groups 70 CSV rows into 49 subscription headers with nested lines. Resolves customer via name→extId→stateTracker chain. Resolves billing account via `{deal_id}_BA` pattern. Correctly blocks when dependencies missing.
 - **One-off loader**: 26 rows, resolves customer by name. Builds invoice payloads.
-- **Orchestrator**: CLI with `--entity`, `--dry-run`, `--report`, `--failures`, `--skip-preflight`. Dependency warnings. Run logging.
+- **Orchestrator**: CLI with `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`. Dependency warnings. Structured logging to `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal.
 - **Idempotency**: SQLite state + NetSuite externalId upsert semantics.
-
----
-
-## TODOs — In Priority Order
-
-### P0: Must fix before any API calls
-
-1. **Terms internal ID resolution**
-   - `loaders/customer.py` uses `{"refName": "Z030 - Payment w/in 30 days net"}` for `terms`.
-   - `refName` may not work for all NS setups. Need to run:
-     ```sql
-     SELECT id, name FROM term WHERE name LIKE '%Z030%'
-     ```
-   - Then replace with `{"id": "<actual_id>"}` in the customer payload.
-
-2. **Verify customer payload against sandbox**
-   - Do a single test POST of one customer to the sandbox.
-   - Check which fields are rejected. NS will return 400/422 with field-level errors.
-   - Common issues: `addressBook` structure, `currency`/`subsidiary` reference format, `terms` lookup.
-
-### P1: Required for full pipeline
-
-3. **Custom field mapping (Customer)**
-   - ~15 MoorePay-specific fields are flagged as TODOs in `loaders/customer.py`:
-     - Company Reg Number, Segment ("Moorepay"), Direct Debit
-     - Business/Class ("Managed Services"), Dunning Procedure, Dunning Contact First/Last Name
-     - Dunning Level ("Level 1 and Above"), Email Preference ("PDF")
-     - Allow Letters to be Emailed, Electronic Email Recipients
-     - Indexation Date, PO Mandatory, n/a 1 (Direct Debit setup), n/a 2 (NS Account Number)
-   - To find script IDs, run:
-     ```sql
-     SELECT scriptid, label FROM customfield WHERE fieldtype = 'ENTITY' ORDER BY label
-     ```
-   - Then add to the customer payload as `payload["custentity_xxx"] = value`.
-
-4. **Subscription plan internal IDs**
-   - `loaders/subscription.py` uses `{"refName": "HR Services rolling (LPG)"}` etc.
-   - Need:
-     ```sql
-     SELECT id, name FROM subscriptionplan
-     ```
-   - Then build a mapping dict and use `{"id": "..."}`.
-
-5. **Sales item internal IDs**
-   - Both subscription lines and one-off invoices reference sales items by `refName`.
-   - Need:
-     ```sql
-     SELECT id, itemid, displayname FROM item WHERE isinactive = 'F'
-     ```
-
-6. **Subscription REST API schema verification**
-   - We don't have the full NS REST schema for the `subscription` record type.
-   - Need to verify: field names for `subscriptionPlan`, `priceBook`, `subscriptionLine` sublist, line item structure.
-   - User can paste from: `https://system.netsuite.com/help/helpcenter/en_US/APIs/REST_API_Browser/record/v1/2024.2/index.html`
-   - Or do: `GET /record/v1/metadata-catalog/subscription` to get the schema programmatically.
-
-7. **One-off invoice record type confirmation**
-   - Currently set to `invoice` in `loaders/one_off.py` (`RECORD_TYPE = "invoice"`).
-   - May need to be `customSale`, `cashSale`, or a custom record. Verify with the MoorePay NS team.
-
-### P2: Nice to have / hardening
-
-8. **Billing account ↔ subscription linkage gap**
-   - Only 14 of 49 subscriptions have a matching billing account in the billing CSV.
-   - Root cause: billing DDL date range ends `2026-02-13`, subscription DDL ends `2026-02-28`.
-   - The subscription loader handles this gracefully (creates without billing account ref), but the linkage may need to be established later.
-
-9. **Data quality — country field**
-   - Customer CSV has "Hampshire" and "Luton" as country values (should be "United Kingdom").
-   - Currently mapped to "GB" in `COUNTRY_MAP` with a fallback. Logged as warnings.
-
-10. **Contact subrecords**
-    - The customer CSV has contact fields (Contact First Name, Contact Last Name, Job Title) that map to the primary contact.
-    - Currently only `title` (Job Title) is set on the customer record. Full contact creation as a separate `contact` record (linked to customer) is not implemented.
-    - NS may require contacts as a subcollection: `contactRoles` on the customer record.
-
-11. **Rate limiting / throughput tuning**
-    - `config.REQUEST_DELAY_SECONDS = 0.5` is conservative. Can be reduced after testing.
-    - NS sandbox rate limits are typically generous.
-
-12. **Retry only failed records**
-    - The `--retry-failed` CLI flag is mentioned in the docstring but not implemented.
-    - Current behavior: re-run skips `success` records, retries everything else.
 
 ---
 

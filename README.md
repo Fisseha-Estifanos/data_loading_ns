@@ -100,42 +100,18 @@ SQLite database at `state/load_state.db`:
 
 ---
 
-## ⚠ TODOs Before Production Run
+## Progress & Outstanding Work
 
-### 1. Terms Internal ID
-The customer payload uses `{"refName": "Z030 - Payment w/in 30 days net"}` for terms.
-If this doesn't resolve, run this SuiteQL to find the ID:
-```sql
-SELECT id, name FROM term WHERE name LIKE '%Z030%'
-```
-Then hardcode in `loaders/customer.py`.
+See [TODO.md](TODO.md) for the full prioritised task list (P0 → P1 → P2).
 
-### 2. Custom Fields (Customer)
-These MoorePay-specific fields need their `custentity_xxx` script IDs:
-- Company Reg Number, Segment, Direct Debit, Business/Class
-- Dunning Procedure, Dunning Contact, Dunning Level
-- Email Preference, Allow Letters to be Emailed
-- Electronic Email Recipients, Indexation Date, PO Mandatory
+### What has been completed
 
-Run: `SELECT scriptid, label FROM customfield WHERE fieldtype = 'ENTITY'`
-
-### 3. Subscription Plan Internal IDs
-Subscription plan references use `{"refName": "..."}`.
-If this doesn't work, look up IDs:
-```sql
-SELECT id, name FROM subscriptionplan
-```
-
-### 4. Sales Item Internal IDs
-Same for subscription line items and one-off invoice items.
-```sql
-SELECT id, itemid, displayname FROM item WHERE itemid LIKE '%Next Gen%'
-```
-
-### 5. One-Off Invoice Record Type
-Currently set to `invoice`. Verify this is correct — might need to be
-`customSale`, `cashSale`, or a custom record type.
-
-### 6. Subscription API Schema
-Request the NetSuite REST schema for the `subscription` record type to verify
-field names (especially line items, priceBook, subscriptionPlan).
+- All imports and module resolution fixed (`loaders/` package structure)
+- Customer loader: 68 records, standard fields mapped (externalId, companyName, subsidiary, currency, email, phone, terms, addressBook)
+- Billing account loader: 100 records, resolves customer NS ID from state tracker
+- Subscription loader: groups 70 CSV rows into 49 unique subscriptions with nested lines; resolves customer + billing account references
+- One-off loader: 26 records, resolves customer by name
+- CLI orchestrator: `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`
+- Idempotent state tracking via SQLite (`state/load_state.db`)
+- Structured logging: `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal
+- 3-tier ID resolution (Location header → GET by externalId → SuiteQL fallback)
