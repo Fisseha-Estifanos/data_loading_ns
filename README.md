@@ -17,7 +17,6 @@ export NS_TOKEN_SECRET="your_token_secret"
 export NS_REALM="4874529-sb3"
 ```
 
-
 Or edit `config.py` directly.
 
 ### Data Files
