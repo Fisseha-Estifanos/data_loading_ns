@@ -106,7 +106,7 @@ class NetSuiteClient:
             "Authorization": self._generate_oauth_header(method, url),
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Prefer": "respond-async, transient",  # request body in response if available
+            "Prefer": "transient",
         }
 
     # ─── Core HTTP Methods ──────────────────────────────────────────────
