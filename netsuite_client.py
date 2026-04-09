@@ -314,6 +314,21 @@ class NetSuiteClient:
 
         # Check for HTTP success (200, 201, 204)
         if resp.status_code not in (200, 201, 204):
+            # Special case: NS says the record already exists (e.g. from a prior async 202 run).
+            # Treat as a successful create — look up the existing record's ID via Tier 2/3.
+            if resp.status_code == 400 and "already exists" in resp.text:
+                logger.warning(
+                    f"{record_type} '{external_id}' already exists in NS — looking up existing ID"
+                )
+                ns_id = self.retrieve_id_by_external_id(record_type, external_id)
+                if ns_id:
+                    return ("success", ns_id, None)
+                if tier3_field and tier3_value:
+                    ns_id = self.retrieve_id_by_suiteql(record_type, tier3_field, tier3_value)
+                    if ns_id:
+                        return ("success", ns_id, None)
+                return ("success_no_id", None, "Record exists in NS but ID could not be resolved")
+
             error_msg = f"HTTP {resp.status_code}: {resp.text[:1000]}"
             logger.error(f"Create {record_type} failed: {error_msg}")
             return ("failed", None, error_msg)
