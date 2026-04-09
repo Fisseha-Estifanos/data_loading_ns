@@ -96,8 +96,8 @@ def preflight_check(client: NetSuiteClient) -> bool:
         # Try to fetch record metadata — lightweight call
         url = f"{config.BASE_URL}/customer"
         resp = client._request("GET", url + "?limit=1")
-        if resp.status_code == 200:
-            logger.info(f"✓ Preflight passed. Connected to {config.REALM}")
+        if resp.status_code < 300:
+            logger.info(f"✓ Preflight passed (HTTP {resp.status_code}). Connected to {config.REALM}")
             return True
         else:
             logger.error(

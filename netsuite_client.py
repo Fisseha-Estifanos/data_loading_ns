@@ -133,6 +133,14 @@ class NetSuiteClient:
                     timeout=60,
                 )
 
+                # Log every response so NS feedback is always visible
+                body_preview = resp.text[:2000] if resp.text else "(empty)"
+                logger.info(
+                    f"  → {method} {url.split('/v1/')[-1]} "
+                    f"| HTTP {resp.status_code} "
+                    f"| {body_preview}"
+                )
+
                 # Rate limiting: 429
                 if resp.status_code == 429:
                     wait = config.RETRY_BACKOFF_SECONDS * attempt
