@@ -97,7 +97,7 @@ def preflight_check(client: NetSuiteClient) -> bool:
         url = f"{config.BASE_URL}/customer"
         resp = client._request("GET", url + "?limit=1")
         if resp.status_code == 200:
-            logger.info(f"✓ Preflight passed. Connected to {config.ACCOUNT_ID}")
+            logger.info(f"✓ Preflight passed. Connected to {config.REALM}")
             return True
         else:
             logger.error(
@@ -195,11 +195,10 @@ def main():
 def _run(args, logger):
 
     # Validate credentials are set
-    if config.CONSUMER_KEY == "YOUR_CONSUMER_KEY":
+    if not config.CONSUMER_KEY:
         logger.error(
-            "Credentials not configured. Set environment variables "
-            "(NS_CONSUMER_KEY, NS_CONSUMER_SECRET, NS_ACCESS_TOKEN, NS_TOKEN_SECRET) "
-            "or edit config.py directly."
+            "Credentials not configured. Source your .env file first:\n"
+            "  export $(grep -v '^#' .env | xargs)"
         )
         sys.exit(1)
 

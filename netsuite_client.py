@@ -3,6 +3,7 @@ NetSuite REST API Client
 =========================
 Handles OAuth 1.0 signing, record CRUD, and robust internal ID retrieval.
 """
+
 import time
 import json
 import logging
@@ -38,7 +39,7 @@ class NetSuiteClient:
         timestamp = str(int(time.time()))
         nonce = uuid.uuid4().hex
 
-        params = {
+        oauth_params = {
             "oauth_consumer_key": config.CONSUMER_KEY,
             "oauth_token": config.ACCESS_TOKEN,
             "oauth_signature_method": "HMAC-SHA256",
@@ -48,27 +49,35 @@ class NetSuiteClient:
         }
 
         # Build the signature base string
-        # 1. Parameter string (sorted, encoded)
-        param_string = "&".join(
-            f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}"
-            for k, v in sorted(params.items())
+        # 1. Split URL into base + query params (both must be included per OAuth 1.0 spec)
+        base_url_clean, _, query_string = url.partition("?")
+        query_params = (
+            dict(urllib.parse.parse_qsl(query_string)) if query_string else {}
         )
 
-        # 2. Base URL (strip query string for signing)
-        base_url_clean = url.split("?")[0]
+        # Merge OAuth params + request query params, then sort
+        all_params = {**oauth_params, **query_params}
+        param_string = "&".join(
+            f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}"
+            for k, v in sorted(all_params.items())
+        )
 
         # 3. Signature base string
-        base_string = "&".join([
-            method.upper(),
-            urllib.parse.quote(base_url_clean, safe=""),
-            urllib.parse.quote(param_string, safe=""),
-        ])
+        base_string = "&".join(
+            [
+                method.upper(),
+                urllib.parse.quote(base_url_clean, safe=""),
+                urllib.parse.quote(param_string, safe=""),
+            ]
+        )
 
         # 4. Signing key
-        signing_key = "&".join([
-            urllib.parse.quote(config.CONSUMER_SECRET, safe=""),
-            urllib.parse.quote(config.TOKEN_SECRET, safe=""),
-        ])
+        signing_key = "&".join(
+            [
+                urllib.parse.quote(config.CONSUMER_SECRET, safe=""),
+                urllib.parse.quote(config.TOKEN_SECRET, safe=""),
+            ]
+        )
 
         # 5. HMAC-SHA256 signature
         signature = base64.b64encode(
@@ -102,7 +111,9 @@ class NetSuiteClient:
 
     # ─── Core HTTP Methods ──────────────────────────────────────────────
 
-    def _request(self, method: str, url: str, payload: dict = None, retries: int = None) -> requests.Response:
+    def _request(
+        self, method: str, url: str, payload: dict = None, retries: int = None
+    ) -> requests.Response:
         """
         Execute an HTTP request with retry logic.
         Returns the raw Response object.
@@ -125,14 +136,18 @@ class NetSuiteClient:
                 # Rate limiting: 429
                 if resp.status_code == 429:
                     wait = config.RETRY_BACKOFF_SECONDS * attempt
-                    logger.warning(f"Rate limited (429). Waiting {wait}s before retry {attempt}/{retries}")
+                    logger.warning(
+                        f"Rate limited (429). Waiting {wait}s before retry {attempt}/{retries}"
+                    )
                     time.sleep(wait)
                     continue
 
                 # Server errors: retry
                 if resp.status_code >= 500:
                     wait = config.RETRY_BACKOFF_SECONDS * attempt
-                    logger.warning(f"Server error {resp.status_code}. Retry {attempt}/{retries} in {wait}s")
+                    logger.warning(
+                        f"Server error {resp.status_code}. Retry {attempt}/{retries} in {wait}s"
+                    )
                     time.sleep(wait)
                     continue
 
@@ -141,7 +156,9 @@ class NetSuiteClient:
             except requests.exceptions.RequestException as e:
                 last_exc = e
                 wait = config.RETRY_BACKOFF_SECONDS * attempt
-                logger.warning(f"Request exception: {e}. Retry {attempt}/{retries} in {wait}s")
+                logger.warning(
+                    f"Request exception: {e}. Retry {attempt}/{retries} in {wait}s"
+                )
                 time.sleep(wait)
 
         # All retries exhausted
@@ -173,7 +190,9 @@ class NetSuiteClient:
         resp = self._request("GET", url)
         if resp.status_code == 200:
             return resp.json()
-        logger.debug(f"GET by externalId returned {resp.status_code} for {record_type} eid:{external_id}")
+        logger.debug(
+            f"GET by externalId returned {resp.status_code} for {record_type} eid:{external_id}"
+        )
         return None
 
     def suiteql_query(self, query: str) -> list:
@@ -209,7 +228,9 @@ class NetSuiteClient:
             # Internal ID is the last path segment
             internal_id = location.rstrip("/").split("/")[-1]
             if internal_id.isdigit():
-                logger.info(f"Tier 1 success: extracted ID {internal_id} from Location header")
+                logger.info(
+                    f"Tier 1 success: extracted ID {internal_id} from Location header"
+                )
                 return internal_id
 
         # Check response body if present
@@ -217,7 +238,9 @@ class NetSuiteClient:
             try:
                 body = resp.json()
                 if "id" in body:
-                    logger.info(f"Tier 1 success: extracted ID {body['id']} from response body")
+                    logger.info(
+                        f"Tier 1 success: extracted ID {body['id']} from response body"
+                    )
                     return str(body["id"])
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -225,18 +248,26 @@ class NetSuiteClient:
         logger.warning("Tier 1 failed: no ID in Location header or response body")
         return None
 
-    def retrieve_id_by_external_id(self, record_type: str, external_id: str) -> Optional[str]:
+    def retrieve_id_by_external_id(
+        self, record_type: str, external_id: str
+    ) -> Optional[str]:
         """
         Tier 2: Look up the record by externalId via GET.
         """
         record = self.get_by_external_id(record_type, external_id)
         if record and "id" in record:
-            logger.info(f"Tier 2 success: found {record_type} ID {record['id']} via externalId '{external_id}'")
+            logger.info(
+                f"Tier 2 success: found {record_type} ID {record['id']} via externalId '{external_id}'"
+            )
             return str(record["id"])
-        logger.warning(f"Tier 2 failed: no {record_type} found for externalId '{external_id}'")
+        logger.warning(
+            f"Tier 2 failed: no {record_type} found for externalId '{external_id}'"
+        )
         return None
 
-    def retrieve_id_by_suiteql(self, record_type: str, field_name: str, field_value: str) -> Optional[str]:
+    def retrieve_id_by_suiteql(
+        self, record_type: str, field_name: str, field_value: str
+    ) -> Optional[str]:
         """
         Tier 3: Last resort — search by a unique business field using SuiteQL.
         """
@@ -244,9 +275,13 @@ class NetSuiteClient:
         results = self.suiteql_query(query)
         if results:
             ns_id = str(results[0].get("id"))
-            logger.info(f"Tier 3 success: found {record_type} ID {ns_id} via SuiteQL ({field_name}='{field_value}')")
+            logger.info(
+                f"Tier 3 success: found {record_type} ID {ns_id} via SuiteQL ({field_name}='{field_value}')"
+            )
             return ns_id
-        logger.warning(f"Tier 3 failed: SuiteQL found no {record_type} for {field_name}='{field_value}'")
+        logger.warning(
+            f"Tier 3 failed: SuiteQL found no {record_type} for {field_name}='{field_value}'"
+        )
         return None
 
     def create_and_resolve_id(
@@ -292,4 +327,8 @@ class NetSuiteClient:
                 return ("success", ns_id, None)
 
         # Record was created (2xx) but we can't find its ID — flag for manual review
-        return ("success_no_id", None, "Record created (2xx) but internal ID could not be resolved via any tier")
+        return (
+            "success_no_id",
+            None,
+            "Record created (2xx) but internal ID could not be resolved via any tier",
+        )
