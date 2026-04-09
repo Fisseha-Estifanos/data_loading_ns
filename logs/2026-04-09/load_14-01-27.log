@@ -1,0 +1,46 @@
+2026-04-09 14:01:27,613 [INFO   ] root: Log file: logs/2026-04-09/load_14-01-27.log
+2026-04-09 14:01:27,616 [INFO   ] main: DRY RUN: preparing customer payloads...
+2026-04-09 14:01:27,618 [INFO   ] main: DRY RUN: 1 customer record(s) would be created
+2026-04-09 14:01:27,618 [INFO   ] main:   Payload for MP_HubSpot_10353346261:
+{
+  "externalId": "MP_HubSpot_10353346261",
+  "companyName": "HARNHAM SEARCH AND SELECTION LIMITED",
+  "isPerson": false,
+  "subsidiary": {
+    "id": "12"
+  },
+  "email": "vanatoma@harnham.com",
+  "phone": "020 - 8408 6070",
+  "currency": {
+    "id": "1"
+  },
+  "terms": {
+    "refName": "Z030 - Payment w/in 30 days net"
+  },
+  "addressBook": {
+    "items": [
+      {
+        "defaultBilling": true,
+        "defaultShipping": true,
+        "label": "Primary",
+        "addressBookAddress": {
+          "addressee": "HARNHAM SEARCH AND SELECTION LIMITED",
+          "attention": "Francesca Harris (CIPD)",
+          "addr1": "3rd Floor, Melbury House",
+          "addr2": "51 Wimbledon Hill Road",
+          "city": "Wimbledon",
+          "state": "London",
+          "zip": "SW19 7QW",
+          "country": {
+            "id": "GB"
+          }
+        }
+      }
+    ]
+  }
+}
+2026-04-09 14:01:27,618 [INFO   ] main: 
+==================================================
+2026-04-09 14:01:27,618 [INFO   ] main: LOAD COMPLETE — SUMMARY
+2026-04-09 14:01:27,618 [INFO   ] main: ==================================================
+2026-04-09 14:01:27,618 [INFO   ] main:   customer: {'total': 1, 'dry_run': True}

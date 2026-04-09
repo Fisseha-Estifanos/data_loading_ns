@@ -20,7 +20,7 @@ TOKEN_SECRET = os.environ.get("NS_TOKEN_SECRET", "YOUR_TOKEN_SECRET")
 REALM = os.environ.get("NS_REALM", ACCOUNT_ID)
 
 # --- Data File Paths ---
-CUSTOMERS_CSV = "data/customerskleeneexport20260409.csv"
+CUSTOMERS_CSV = "data/customers-kleene-export-2026-04-09.csv"
 BILLING_CSV = "data/billingkleeneexport20260409.csv"
 SUBSCRIPTIONS_CSV = "data/subscriptionskleeneexport20260409.csv"
 ONEOFF_CSV = "data/oneoffkleeneexport20260409.csv"
