@@ -6,6 +6,30 @@ Load customer, billing account, subscription, and one-off invoice data from Snow
 
 ---
 
+## ⛔ STRICT DATA INTEGRITY RULE — DO NOT MODIFY SOURCE DATA
+
+**This loader must never silently alter, default, or invent data values.**
+
+The CSVs are the authoritative source of truth, produced by Snowflake transformations. Any modification here — even well-intentioned — corrupts the audit trail and creates records in NetSuite that don't match the source.
+
+### What this means in practice
+
+- **No silent defaults.** If a required field (subsidiary, currency, country, etc.) is missing or unmapped, the record must **fail with a clear error** — never substitute a guessed value.
+- **No data coercion.** Do not reformat, normalise, or transform field values (e.g. phone numbers, dates, country names) before sending. Send exactly what the CSV contains.
+- **No fallback values.** `SUBSIDIARY_MAP.get(name, "12")` is wrong — the `, "12"` default must not exist. Same for currency, country, and any other lookup.
+- **Whitespace stripping (`.strip()`) is acceptable** — it's not a data change, just cleaning CSV artefacts.
+- **`or None` to drop empty strings is acceptable** — sending an empty string to NS is different from omitting the field.
+
+### Currently known violations (to be fixed — see TODO.md)
+
+- `loaders/customer.py`: unmapped countries silently default to `"GB"`
+- `loaders/subscription.py`: unmapped subsidiary defaults to `"12"`, unmapped currency defaults to `"1"`
+- `loaders/one_off.py`: same subsidiary and currency defaults; blank quantity defaults to `1`
+
+If you are adding or editing any loader code, **do not introduce new defaults or fallbacks**. If a value can't be resolved, log an error and return `None` to skip the record.
+
+---
+
 ## Architecture
 
 ```

@@ -2,10 +2,23 @@
 
 > Track progress against the migration pipeline. Update status as tasks are completed.
 > Status key: `[ ]` pending · `[~]` in progress · `[x]` done
+>
+> ⛔ **Data integrity rule:** This loader must never silently alter, default, or invent values.
+> If a field is missing or unmapped, the record must **fail with a logged error** — never substitute a default.
+> See README.md and CLAUDE.md for the full rule and known violations.
 
 ---
 
 ## P0 — Must fix before any API calls
+
+- [ ] **Fix silent data defaults — violates data integrity rule**
+  - These must be changed to hard failures (log error + skip record) instead of guessing:
+  - `loaders/customer.py` line 144–145: unmapped country → silently defaults to `"GB"`
+  - `loaders/subscription.py` line 128: unmapped subsidiary → silently defaults to `"12"` (Moorepay Ltd)
+  - `loaders/subscription.py` line 130: unmapped currency → silently defaults to `"1"` (GBP)
+  - `loaders/one_off.py` line 73: unmapped subsidiary → silently defaults to `"12"`
+  - `loaders/one_off.py` line 75: unmapped currency → silently defaults to `"1"`
+  - `loaders/one_off.py` line 78: blank quantity → silently defaults to `1`
 
 - [x] **Test single customer POST against sandbox**
   - Payload structure validated. Customer `MP_HubSpot_10353346261` created in NS as ID `800518`.

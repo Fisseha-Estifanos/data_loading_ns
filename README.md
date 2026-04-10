@@ -1,5 +1,27 @@
 # NetSuite Data Loader — MoorePay HubSpot Migration
 
+---
+
+## ⛔ Data Integrity Rule — No Silent Data Modification
+
+**This loader must never silently alter, default, or invent values from the source CSVs.**
+
+The CSVs are produced by Snowflake and are the authoritative source of truth. Any modification here — even well-intentioned — corrupts the audit trail and creates records in NetSuite that don't match the source system.
+
+**Rules:**
+- If a required field is missing or unmapped, the record **must fail with a logged error** — never substitute a default value
+- Do not reformat, normalise, or transform field values before sending to NS
+- No fallback values in lookups (e.g. `SUBSIDIARY_MAP.get(name, "12")` is wrong — drop the default)
+- `.strip()` and converting empty strings to `None` are the only permitted data touches
+
+**Known violations currently in the code (tracked in TODO.md):**
+- Country unmapped → silently defaults to `"GB"` (`loaders/customer.py`)
+- Subsidiary unmapped → silently defaults to `"12"` (`loaders/subscription.py`, `loaders/one_off.py`)
+- Currency unmapped → silently defaults to `"1"` (`loaders/subscription.py`, `loaders/one_off.py`)
+- Blank quantity → silently defaults to `1` (`loaders/one_off.py`)
+
+---
+
 ## Setup
 
 ```bash
