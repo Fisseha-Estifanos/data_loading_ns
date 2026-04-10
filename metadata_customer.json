@@ -1,0 +1,25 @@
+{
+  "name": "customer",
+  "links": [
+    {
+      "rel": "canonical",
+      "href": "https://4874529-sb3.suitetalk.api.netsuite.com/services/rest/record/v1/metadata-catalog/customer",
+      "mediaType": "application/json"
+    },
+    {
+      "rel": "alternate",
+      "href": "https://4874529-sb3.suitetalk.api.netsuite.com/services/rest/record/v1/metadata-catalog/customer",
+      "mediaType": "application/swagger+json"
+    },
+    {
+      "rel": "alternate",
+      "href": "https://4874529-sb3.suitetalk.api.netsuite.com/services/rest/record/v1/metadata-catalog/customer",
+      "mediaType": "application/schema+json"
+    },
+    {
+      "rel": "describes",
+      "href": "https://4874529-sb3.suitetalk.api.netsuite.com/services/rest/record/v1/customer",
+      "mediaType": "application/schema+json"
+    }
+  ]
+}
