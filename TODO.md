@@ -13,10 +13,10 @@
   - Auth bug fixed: OAuth realm must be `4874529_SB3` (uppercase + underscore), not `4874529-sb3`.
   - `respond-async` removed from Prefer header — was causing silent 202 async creates.
 
-- [ ] **Resolve `terms` internal ID**
-  - `loaders/customer.py` uses `{"refName": "Z030 - Payment w/in 30 days net"}` — refName may not resolve
-  - Run in SuiteQL: `SELECT id, name FROM term WHERE name LIKE '%Z030%'`
-  - Replace with `{"id": "<actual_id>"}` in `loaders/customer.py`
+- [ ] **Resolve `terms` internal ID** ⚠️ do after full customer load
+  - ID is already known: `19` (`Z030 - Payment w/in 30 days net`) — confirmed via SuiteQL
+  - Replace `{"refName": "Z030 - Payment w/in 30 days net"}` with `{"id": "19"}` in `loaders/customer.py`
+  - Then re-run customers to patch existing records
 
 ---
 
@@ -27,21 +27,17 @@
   - Run: `python main.py --entity customer`
   - Verify: `python main.py --report --failures`
 
-- [ ] **Map ~15 custom fields on Customer record**
-  - Live GET response revealed these custentity IDs already on the sandbox record:
+- [ ] **Map ~15 custom fields on Customer record** ⚠️ do after full customer load
+  - `custentity_xxx` fields are intentionally left empty for now — customers load fine without them
+  - Live GET response revealed script IDs already on the sandbox record:
     - `custentity_2663_direct_debit`
     - `custentity_3805_dunning_letters_toemail`
     - `custentity_3805_dunning_letters_toprint`
     - `custentity_3805_dunning_manager`
     - `custentity6`, `custentity9`, `custentity15_2`, `custentity19`, `custentity376`
     - `cseg_busclass` (Business/Class segment)
-  - Still need to match script IDs to CSV column labels — run:
-
-    ```sql
-    SELECT scriptid, label FROM customfield WHERE recordtype = 'ENTITY' ORDER BY label
-    ```
-
-  - Then add mapped values to `loaders/customer.py`
+  - Full schema saved to `metadata_customer.json` — use that to match script IDs to CSV column labels
+  - Then add mapped values to `loaders/customer.py` and re-run to patch
 
 - [ ] **Resolve subscription plan internal IDs**
   - `loaders/subscription.py` uses `{"refName": "HR Services rolling (LPG)"}` etc.

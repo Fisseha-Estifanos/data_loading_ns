@@ -113,42 +113,50 @@ def preflight_check(client: NetSuiteClient) -> bool:
 
 
 def print_report(tracker: StateTracker, show_failures: bool = False):
-    """Print a summary of the current load state."""
-    print("\n" + "=" * 70)
-    print("  LOAD STATE REPORT")
-    print("=" * 70)
+    """Print a summary of the current load state — to both terminal and log file."""
+    report_logger = logging.getLogger("report")
+
+    lines = []
+    lines.append("\n" + "=" * 70)
+    lines.append("  LOAD STATE REPORT")
+    lines.append("=" * 70)
 
     for entity in ENTITY_ORDER:
         summary = tracker.summary(entity)
         if not summary:
-            print(f"\n  {entity:20s}  — no records tracked")
+            lines.append(f"\n  {entity:20s}  — no records tracked")
             continue
 
         total = sum(summary.values())
-        print(f"\n  {entity:20s}  total={total}")
+        lines.append(f"\n  {entity:20s}  total={total}")
         for status, count in sorted(summary.items()):
-            print(f"    {status:20s}: {count}")
+            lines.append(f"    {status:20s}: {count}")
 
-        # Missing IDs warning
         missing = tracker.get_missing_ids(entity)
         if missing:
-            print(f"    ⚠ {len(missing)} records created but NS ID unresolved")
+            lines.append(f"    ⚠ {len(missing)} records created but NS ID unresolved")
 
     if show_failures:
-        print("\n" + "-" * 70)
-        print("  FAILED RECORDS")
-        print("-" * 70)
+        lines.append("\n" + "-" * 70)
+        lines.append("  FAILED RECORDS")
+        lines.append("-" * 70)
         for entity in ENTITY_ORDER:
             failed = tracker.get_failed(entity)
             if not failed:
                 continue
-            print(f"\n  [{entity}] — {len(failed)} failures:")
+            lines.append(f"\n  [{entity}] — {len(failed)} failures:")
             for rec in failed:
-                print(f"    extId={rec['external_id']}")
-                print(f"      error: {rec['error_message'][:200]}")
-                print(f"      at:    {rec['attempted_at']}")
+                lines.append(f"    extId={rec['external_id']}")
+                lines.append(f"      error: {rec['error_message'][:500]}")
+                lines.append(f"      at:    {rec['attempted_at']}")
 
-    print("\n" + "=" * 70 + "\n")
+    lines.append("\n" + "=" * 70 + "\n")
+
+    output = "\n".join(lines)
+    # Print to terminal
+    print(output)
+    # Also write to log file
+    report_logger.info(output)
 
 
 # ─── Main ───────────────────────────────────────────────────────────────
