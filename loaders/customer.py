@@ -122,6 +122,7 @@ class CustomerLoader(BaseLoader):
 
         # Remove None values to keep payload clean
         payload = {k: v for k, v in payload.items() if v is not None}
+        logger.info(f"Customer Payload: {payload}")
 
         return payload
 
