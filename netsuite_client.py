@@ -203,24 +203,46 @@ class NetSuiteClient:
         )
         return None
 
-    def suiteql_query(self, query: str) -> list:
-        """Execute a SuiteQL query. Returns list of result rows."""
-        time.sleep(config.REQUEST_DELAY_SECONDS)
-        url = self.suiteql_url
-        # SuiteQL uses a different header for Prefer
-        headers = self._headers("POST", url)
-        headers["Prefer"] = "transient"
-        resp = self.session.post(
-            url,
-            headers=headers,
-            json={"q": query},
-            timeout=60,
-        )
-        if resp.status_code == 200:
+    def suiteql_query(self, query: str, page_size: int = 1000) -> list:
+        """
+        Execute a SuiteQL query. Automatically paginates until hasMore = false.
+        Returns all result rows across all pages.
+        """
+        all_items = []
+        offset = 0
+
+        while True:
+            time.sleep(config.REQUEST_DELAY_SECONDS)
+            url = f"{self.suiteql_url}?limit={page_size}&offset={offset}"
+            headers = self._headers("POST", url)
+            headers["Prefer"] = "transient"
+            resp = self.session.post(
+                url,
+                headers=headers,
+                json={"q": query},
+                timeout=60,
+            )
+
+            if resp.status_code != 200:
+                logger.warning(f"SuiteQL query failed ({resp.status_code}): {resp.text[:500]}")
+                break
+
             data = resp.json()
-            return data.get("items", [])
-        logger.warning(f"SuiteQL query failed ({resp.status_code}): {resp.text[:500]}")
-        return []
+            items = data.get("items", [])
+            all_items.extend(items)
+
+            total = data.get("totalResults", len(all_items))
+            has_more = data.get("hasMore", False)
+            logger.debug(
+                f"SuiteQL page offset={offset}: {len(items)} rows "
+                f"(total={total}, hasMore={has_more})"
+            )
+
+            if not has_more:
+                break
+            offset += page_size
+
+        return all_items
 
     # ─── 3-Tier Internal ID Retrieval ───────────────────────────────────
 
