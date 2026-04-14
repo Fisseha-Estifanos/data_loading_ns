@@ -4,6 +4,7 @@ Billing Account Loader
 Maps billingkleeneexport CSV → NetSuite Billing Account records.
 Key dependency: Customer must be loaded first (needs customer NS internal ID).
 """
+
 import logging
 from typing import Optional
 
@@ -14,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 class BillingAccountLoader(BaseLoader):
+    """Billing Account Loader"""
+
     ENTITY_TYPE = "billingAccount"
     RECORD_TYPE = "billingAccount"
     CSV_PATH = config.BILLING_CSV
@@ -33,7 +36,9 @@ class BillingAccountLoader(BaseLoader):
         customer_ext_id = row.get("customer_externalId", "").strip()
 
         if not ext_id or not customer_ext_id:
-            logger.warning(f"Skipping billing account: missing externalId or customer_externalId")
+            logger.warning(
+                "Skipping billing account: missing externalId or customer_externalId"
+            )
             return None
 
         # ── Resolve Customer Internal ID ────────────────────────────────
@@ -61,7 +66,10 @@ class BillingAccountLoader(BaseLoader):
             "frequency": {"id": frequency},  # e.g. "MONTHLY"
             "startDate": start_date,
             "customerDefault": row.get("customerDefault", "").strip().lower() == "true",
-            "requestOffCycleInvoice": row.get("requestOffCycleInvoice", "").strip().lower() == "true",
+            "requestOffCycleInvoice": row.get("requestOffCycleInvoice", "")
+            .strip()
+            .lower()
+            == "true",
             "inactive": row.get("inactive", "").strip().lower() == "true",
         }
 
