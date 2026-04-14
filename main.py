@@ -451,11 +451,20 @@ def _run(args, logger):
                 results[entity] = loader.load_all(limit=args.limit)
 
         # Final summary
-        logger.info("\n" + "=" * 50)
-        logger.info("LOAD COMPLETE — SUMMARY")
-        logger.info("=" * 50)
+        lines = ["\n" + "=" * 70, "  LOAD COMPLETE — SUMMARY", "=" * 70]
         for entity, result in results.items():
-            logger.info(f"  {entity}: {result}")
+            if result.get("dry_run"):
+                lines.append(
+                    f"\n  {entity:20s}  DRY RUN — {result['total']} record(s) would be created"
+                )
+            else:
+                total = result.get("total", 0)
+                lines.append(f"\n  {entity:20s}  total={total}")
+                for key in ("success", "failed", "skipped"):
+                    if key in result:
+                        lines.append(f"    {key:20s}: {result[key]}")
+        lines.append("\n" + "=" * 70)
+        logger.info("\n".join(lines))
 
         # Print report
         print_report(tracker, show_failures=True)
