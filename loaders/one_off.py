@@ -6,6 +6,7 @@ Maps oneoffkleeneexport CSV → NetSuite Invoice (or Custom) records.
 These are one-time charges linked to subscriptions.
 Dependencies: Customer must be loaded first.
 """
+
 import csv
 import logging
 from typing import Optional
@@ -27,6 +28,8 @@ CURRENCY_MAP = {
 
 
 class OneOffLoader(BaseLoader):
+    """One Off Loader"""
+
     ENTITY_TYPE = "oneOff"
     RECORD_TYPE = "invoice"  # TODO: Verify — might be 'customSale' or 'cashSale'
     CSV_PATH = config.ONEOFF_CSV
@@ -108,7 +111,11 @@ class OneOffLoader(BaseLoader):
             "item": {
                 "items": [
                     {
-                        "item": {"refName": item_name} if item_name and item_name != "NOT MAPPED" else None,
+                        "item": (
+                            {"refName": item_name}
+                            if item_name and item_name != "NOT MAPPED"
+                            else None
+                        ),
                         "quantity": float(quantity),
                         "rate": rate,
                         "description": description,
@@ -134,4 +141,5 @@ class OneOffLoader(BaseLoader):
         ]
 
         payload = {k: v for k, v in payload.items() if v is not None}
+        logger.info(f"One Off Payload: {payload}")
         return payload

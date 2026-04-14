@@ -12,6 +12,7 @@ Key design:
 
 Dependencies: Customer and Billing Account must be loaded first.
 """
+
 import csv
 import logging
 from collections import defaultdict
@@ -36,6 +37,8 @@ CURRENCY_MAP = {
 
 
 class SubscriptionLoader(BaseLoader):
+    """Subscription Loader"""
+
     ENTITY_TYPE = "subscription"
     RECORD_TYPE = "subscription"
     CSV_PATH = config.SUBSCRIPTIONS_CSV
@@ -103,7 +106,9 @@ class SubscriptionLoader(BaseLoader):
         customer_name = header.get("Customer", "").strip()
         customer_ext_id = self._customer_name_to_ext_id.get(customer_name.upper())
         if not customer_ext_id:
-            logger.error(f"Subscription {ext_id}: cannot resolve customer '{customer_name}' to external ID")
+            logger.error(
+                f"Subscription {ext_id}: cannot resolve customer '{customer_name}' to external ID"
+            )
             return None
 
         customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id)
@@ -116,7 +121,9 @@ class SubscriptionLoader(BaseLoader):
 
         # Resolve billing account (may not exist for all subscriptions)
         billing_account_ext_id = f"{ext_id}_BA"
-        billing_account_ns_id = self.tracker.get_netsuite_id("billingAccount", billing_account_ext_id)
+        billing_account_ns_id = self.tracker.get_netsuite_id(
+            "billingAccount", billing_account_ext_id
+        )
         if not billing_account_ns_id:
             logger.warning(
                 f"Subscription {ext_id}: no billing account found for {billing_account_ext_id}. "
@@ -202,7 +209,7 @@ class SubscriptionLoader(BaseLoader):
 
         # Clean None values
         payload = {k: v for k, v in payload.items() if v is not None}
-
+        logger.info(f"Subscription Payload: {payload}")
         return payload
 
     def _build_line(self, row: dict) -> Optional[dict]:
