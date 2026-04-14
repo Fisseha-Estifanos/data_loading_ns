@@ -9,16 +9,44 @@
 
 ---
 
+## CLI Quick Reference
+
+Run in this order:
+
+```text
+python main.py --field-map                        # 1. Inspect all CSV→API field mappings (no credentials)
+python main.py --dry-run --entity customer        # 2. Validate payloads before going live
+python main.py --dry-run --limit 1                #    Test a single record
+python main.py --entity customer                  # 3. Load customers first (no dependencies)
+python main.py --entity billingAccount            # 4. Load billing accounts (needs customers)
+python main.py --entity subscription              # 5. Load subscriptions (needs customers + billing)
+python main.py --entity oneOff                    # 6. Load one-off invoices (needs customers)
+python main.py --report                           # 7. Check state summary + field mapping
+python main.py --report --failures                #    Include per-record error details
+```
+
+| Flag               | Description                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `--entity`         | Load one entity type: customer, billingAccount, subscription, oneOff                     |
+| `--dry-run`        | Build payloads and log them — no API calls made                                          |
+| `--limit N`        | Process only first N records                                                             |
+| `--skip-preflight` | Skip auth connectivity check at startup                                                  |
+| `--report`         | Print load state summary. Also prints field mapping. No loading.                         |
+| `--failures`       | Add per-record error details to `--report` output                                        |
+| `--field-map`      | Print CSV column → NetSuite API field mapping for all loaders. No credentials needed     |
+
+---
+
 ## P0 — Must fix before any API calls
 
-- [ ] **Fix silent data defaults — violates data integrity rule**
-  - These must be changed to hard failures (log error + skip record) instead of guessing:
-  - `loaders/customer.py` line 144–145: unmapped country → silently defaults to `"GB"`
-  - `loaders/subscription.py` line 128: unmapped subsidiary → silently defaults to `"12"` (Moorepay Ltd)
-  - `loaders/subscription.py` line 130: unmapped currency → silently defaults to `"1"` (GBP)
-  - `loaders/one_off.py` line 73: unmapped subsidiary → silently defaults to `"12"`
-  - `loaders/one_off.py` line 75: unmapped currency → silently defaults to `"1"`
-  - `loaders/one_off.py` line 78: blank quantity → silently defaults to `1`
+- [x] **Fix silent data defaults — violates data integrity rule**
+  - All changed to hard failures (log error + return None) instead of guessing:
+  - `loaders/customer.py`: unmapped country → error + skip ✅
+  - `loaders/subscription.py`: unmapped subsidiary → error + skip ✅
+  - `loaders/subscription.py`: unmapped currency → error + skip ✅
+  - `loaders/one_off.py`: unmapped subsidiary → error + skip ✅
+  - `loaders/one_off.py`: unmapped currency → error + skip ✅
+  - `loaders/one_off.py`: blank quantity → error + skip ✅
 
 - [x] **Test single customer POST against sandbox**
   - Payload structure validated. Customer `MP_HubSpot_10353346261` created in NS as ID `800518`.

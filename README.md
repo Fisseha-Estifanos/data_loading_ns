@@ -9,16 +9,13 @@
 The CSVs are produced by Snowflake and are the authoritative source of truth. Any modification here — even well-intentioned — corrupts the audit trail and creates records in NetSuite that don't match the source system.
 
 **Rules:**
+
 - If a required field is missing or unmapped, the record **must fail with a logged error** — never substitute a default value
 - Do not reformat, normalise, or transform field values before sending to NS
 - No fallback values in lookups (e.g. `SUBSIDIARY_MAP.get(name, "12")` is wrong — drop the default)
 - `.strip()` and converting empty strings to `None` are the only permitted data touches
 
-**Known violations currently in the code (tracked in TODO.md):**
-- Country unmapped → silently defaults to `"GB"` (`loaders/customer.py`)
-- Subsidiary unmapped → silently defaults to `"12"` (`loaders/subscription.py`, `loaders/one_off.py`)
-- Currency unmapped → silently defaults to `"1"` (`loaders/subscription.py`, `loaders/one_off.py`)
-- Blank quantity → silently defaults to `1` (`loaders/one_off.py`)
+All known violations have been fixed — every unmapped/blank required field now fails with a logged error and skips the record. See TODO.md for any outstanding items.
 
 ---
 
@@ -31,6 +28,7 @@ pip install requests
 ### Credentials
 
 Set environment variables:
+
 ```bash
 export NS_CONSUMER_KEY="your_consumer_key"
 export NS_CONSUMER_SECRET="your_consumer_secret"
@@ -44,6 +42,7 @@ Or edit `config.py` directly.
 ### Data Files
 
 Place CSVs in `data/`:
+
 - `customerskleeneexport20260409.csv`
 - `billingkleeneexport20260409.csv`
 - `subscriptionskleeneexport20260409.csv`
@@ -51,32 +50,47 @@ Place CSVs in `data/`:
 
 ---
 
-## Usage
+## CLI Reference
 
-```bash
-# Dry run — build payloads without calling API
-python main.py --dry-run
+Run in this order for a full migration:
 
-# Load all entities in order (Customer → Billing → Subscription → One-off)
-python main.py
+```text
+Step 1 — Inspect mappings (no credentials needed)
+  python main.py --field-map
 
-# Load only one entity type
-python main.py --entity customer
-python main.py --entity billingAccount
-python main.py --entity subscription
-python main.py --entity oneOff
+Step 2 — Dry run (validate payloads, no API calls)
+  python main.py --dry-run
+  python main.py --dry-run --entity customer
+  python main.py --dry-run --limit 1
 
-# View state report
-python main.py --report
-python main.py --report --failures
+Step 3 — Load (live API calls, dependency order must be respected)
+  python main.py --entity customer
+  python main.py --entity billingAccount
+  python main.py --entity subscription
+  python main.py --entity oneOff
+  python main.py                          # all four in order
 
-# Skip auth check (if you know it works)
-python main.py --skip-preflight
+Step 4 — Review results
+  python main.py --report
+  python main.py --report --failures
 ```
+
+### All flags
+
+| Flag                 | Values                                              | Description                                                                                         |
+| -------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `--entity`           | `customer` `billingAccount` `subscription` `oneOff` | Load only this entity type. Omit to run all four in dependency order.                               |
+| `--dry-run`          | —                                                   | Build and log payloads without making any API calls.                                                |
+| `--limit N`          | integer                                             | Process only the first N records. Use with `--dry-run` or a live run to test a single record.       |
+| `--skip-preflight`   | —                                                   | Skip the auth connectivity check at startup.                                                        |
+| `--report`           | —                                                   | Print the load state summary (counts per status per entity). No loading. Also prints field mapping. |
+| `--failures`         | —                                                   | Add failure details (error message, timestamp) to `--report` output. Must be used with `--report`.  |
+| `--field-map`        | —                                                   | Print the CSV column → NetSuite API field mapping table for all loaders. No credentials needed.     |
 
 ### Re-runs
 
 The loader is **idempotent**. On re-run:
+
 - Records with `status=success` are skipped automatically
 - Failed records are retried
 - NetSuite externalId prevents duplicate creation even if state DB is lost
@@ -85,7 +99,7 @@ The loader is **idempotent**. On re-run:
 
 ## Load Order & Dependencies
 
-```
+```text
 1. Customer              (no dependencies)
 2. Billing Account       ← references Customer NS internal ID
 3. Subscription          ← references Customer + Billing Account NS internal IDs
