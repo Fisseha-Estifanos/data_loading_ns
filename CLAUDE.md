@@ -20,11 +20,7 @@ The CSVs are the authoritative source of truth, produced by Snowflake transforma
 - **Whitespace stripping (`.strip()`) is acceptable** — it's not a data change, just cleaning CSV artefacts.
 - **`or None` to drop empty strings is acceptable** — sending an empty string to NS is different from omitting the field.
 
-### Currently known violations (to be fixed — see TODO.md)
-
-- `loaders/customer.py`: unmapped countries silently default to `"GB"`
-- `loaders/subscription.py`: unmapped subsidiary defaults to `"12"`, unmapped currency defaults to `"1"`
-- `loaders/one_off.py`: same subsidiary and currency defaults; blank quantity defaults to `1`
+All known violations have been fixed. Every unmapped or blank required field now logs an error and returns `None` to skip the record — no silent defaults remain.
 
 If you are adding or editing any loader code, **do not introduce new defaults or fallbacks**. If a value can't be resolved, log an error and return `None` to skip the record.
 
@@ -131,7 +127,7 @@ See **[TODO.md](TODO.md)** for the full prioritised task list (P0 → P1 → P2)
 - **Billing account loader**: correctly resolves customer NS ID from state tracker. Blocks if customer not yet loaded. All 100 rows parse correctly.
 - **Subscription loader**: groups 70 CSV rows into 49 subscription headers with nested lines. Resolves customer via name→extId→stateTracker chain. Resolves billing account via `{deal_id}_BA` pattern. Correctly blocks when dependencies missing.
 - **One-off loader**: 26 rows, resolves customer by name. Builds invoice payloads.
-- **Orchestrator**: CLI with `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`. Dependency warnings. Structured logging to `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal.
+- **Orchestrator**: CLI with `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`. Dependency warnings. Structured logging to `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal.
 - **Idempotency**: SQLite state + NetSuite externalId upsert semantics.
 
 ---
@@ -151,18 +147,19 @@ See **[TODO.md](TODO.md)** for the full prioritised task list (P0 → P1 → P2)
 | Terms | `terms.refName` | ⚠️ Needs ID verification |
 | Address fields | `addressBook.items[]` | ✅ Mapped with country code resolution |
 | Job Title | `title` | ✅ Mapped |
-| Company Reg Number | `custentity_???` | ❌ Custom field ID needed |
-| Segment | `custentity_???` | ❌ Custom field ID needed |
-| Direct Debit | `custentity_???` | ❌ Custom field ID needed |
-| Business/Class | `custentity_???` | ❌ Custom field ID needed |
-| Dunning Procedure | `custentity_???` | ❌ Custom field ID needed |
-| Dunning Contact First/Last | `custentity_???` | ❌ Custom field ID needed |
-| Dunning Level (Req) | `custentity_???` | ❌ Custom field ID needed |
-| Email Preference | `custentity_???` | ❌ Custom field ID needed |
-| Allow Letters to be Emailed | `custentity_???` | ❌ Custom field ID needed |
-| Electronic Email Recipients | `custentity_???` | ❌ Custom field ID needed |
-| Indexation Date | `custentity_???` | ❌ Custom field ID needed |
-| PO Mandatory | `custentity_???` | ❌ Custom field ID needed |
+| Direct Debit | `custentity_2663_direct_debit` | ✅ Script ID confirmed — bool |
+| Allow Letters to be Emailed | `custentity_3805_dunning_letters_toemail` | ✅ Script ID confirmed — bool |
+| PO Mandatory | `custentity_zellis_po_mandatory` | ✅ Script ID confirmed — bool |
+| Dunning Procedure | `custentity_3805_dunning_procedure` | ⚠️ Script ID confirmed — linked record, NS value ID needed (awaiting client) |
+| Business/Class | `cseg_busclass` | ⚠️ Script ID confirmed — linked record. "Managed Services" = ID `1` (confirmed via SuiteQL) |
+| Company Reg Number | `custentity_???` | ❌ Awaiting client: label for one of custentity6/9/15_2/19/376 |
+| Segment | `custentity_???` | ❌ Awaiting client: label for one of custentity6/9/15_2/19/376 |
+| Dunning Contact First Name | `custentity_???` | ❌ Awaiting client: label lookup needed |
+| Dunning Contact Last Name | `custentity_???` | ❌ Awaiting client: label lookup needed |
+| Dunning Level (Req) | `custentity_???` | ❌ Awaiting client: label lookup needed |
+| Email Preference | `custentity_???` | ❌ Awaiting client: label lookup needed |
+| Electronic Email Recipients | `custentity_???` | ❌ Awaiting client: label lookup needed |
+| Indexation Date | `custentity_???` | ❌ Awaiting client: label lookup needed |
 
 ### CSV Column → NetSuite Field Mappings (Billing Account)
 

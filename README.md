@@ -147,7 +147,7 @@ See [TODO.md](TODO.md) for the full prioritised task list (P0 → P1 → P2).
 - Billing account loader: 100 records, resolves customer NS ID from state tracker
 - Subscription loader: groups 70 CSV rows into 49 unique subscriptions with nested lines; resolves customer + billing account references
 - One-off loader: 26 records, resolves customer by name
-- CLI orchestrator: `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`
+- CLI orchestrator: `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`
 - Idempotent state tracking via SQLite (`state/load_state.db`)
 - Structured logging: `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal
 - 3-tier ID resolution (Location header → GET by externalId → SuiteQL fallback)

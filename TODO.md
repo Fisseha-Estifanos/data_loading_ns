@@ -68,17 +68,18 @@ python main.py --report --failures                #    Include per-record error 
   - Run: `python main.py --entity customer`
   - Verify: `python main.py --report --failures`
 
-- [ ] **Map ~15 custom fields on Customer record** ⚠️ do after full customer load
-  - `custentity_xxx` fields are intentionally left empty for now — customers load fine without them
-  - Live GET response revealed script IDs already on the sandbox record:
-    - `custentity_2663_direct_debit`
-    - `custentity_3805_dunning_letters_toemail`
-    - `custentity_3805_dunning_letters_toprint`
-    - `custentity_3805_dunning_manager`
-    - `custentity6`, `custentity9`, `custentity15_2`, `custentity19`, `custentity376`
-    - `cseg_busclass` (Business/Class segment)
-  - Full schema saved to `metadata_customer.json` — use that to match script IDs to CSV column labels
-  - Then add mapped values to `loaders/customer.py` and re-run to patch
+- [~] **Map custom fields on Customer record** ⚠️ do after full customer load
+  - Customers load fine without these — do not block the pipeline on them
+  - **Confirmed script IDs + types (from live GET on customer/800518):**
+    - `custentity_2663_direct_debit` → bool
+    - `custentity_3805_dunning_letters_toemail` → bool (Allow Letters to be Emailed)
+    - `custentity_zellis_po_mandatory` → bool (PO Mandatory)
+    - `custentity_3805_dunning_procedure` → linked record (`{"id": "..."}`) — **NS value ID needed**
+    - `cseg_busclass` → linked record (`{"id": "..."}`) — "Managed Services" = ID `1` ✅
+  - **Awaiting client response** (sent message requesting these):
+    - Labels for `custentity6`, `custentity9`, `custentity15_2`, `custentity19`, `custentity376` → needed to identify Company Reg Number, Segment, Dunning Contact, Dunning Level, Email Preference, Electronic Email Recipients, Indexation Date
+    - NS internal ID for the correct MoorePay Dunning Procedure value (`customrecord_3805_dunning_procedure` is not queryable via SuiteQL — NS UI lookup needed)
+  - Once client responds: add confirmed mappings to `loaders/customer.py` and re-run to patch existing records
 
 - [ ] **Resolve subscription plan internal IDs**
   - `loaders/subscription.py` uses `{"refName": "HR Services rolling (LPG)"}` etc.
