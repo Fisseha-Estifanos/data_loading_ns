@@ -3,6 +3,14 @@ Billing Account Loader
 =======================
 Maps billingkleeneexport CSV → NetSuite Billing Account records.
 Key dependency: Customer must be loaded first (needs customer NS internal ID).
+
+Address resolution:
+  NS requires billAddressList and shipAddressList on every billing account.
+  These are not in the CSV — they are looked up live from NS at loader init
+  via SuiteQL: SELECT internalid, entity, defaultbilling, defaultshipping
+               FROM customeraddressbook WHERE defaultbilling = 'T' OR defaultshipping = 'T'
+  One query at startup builds a customer_ns_id → address_id map for both
+  billing and shipping. No extra API calls per record.
 """
 
 import logging
@@ -15,11 +23,56 @@ logger = logging.getLogger(__name__)
 
 
 class BillingAccountLoader(BaseLoader):
-    """Billing Account Loader"""
 
     ENTITY_TYPE = "billingAccount"
     RECORD_TYPE = "billingAccount"
     CSV_PATH = config.BILLING_CSV
+
+    def __init__(self, client, tracker):
+        super().__init__(client, tracker)
+        self._bill_addr_map: dict = (
+            {}
+        )  # customer NS ID → default billing addressbook ID
+        self._ship_addr_map: dict = (
+            {}
+        )  # customer NS ID → default shipping addressbook ID
+        self._load_address_maps()
+
+    def _load_address_maps(self):
+        """
+        Query NS once at startup for all customer default billing/shipping
+        address IDs. Builds two dicts keyed by customer NS internal ID.
+        """
+        logger.info(
+            "Fetching customer address book entries from NetSuite "
+            "(needed for billAddressList / shipAddressList)..."
+        )
+        try:
+            rows = self.client.suiteql_query(
+                "SELECT internalid, entity, defaultbilling, defaultshipping "
+                "FROM customeraddressbook "
+                "WHERE defaultbilling = 'T' OR defaultshipping = 'T'"
+            )
+        except Exception as e:
+            logger.error(
+                f"Address map fetch failed: {e}. billAddressList/shipAddressList will be unresolvable."
+            )
+            return
+
+        for row in rows:
+            entity_id = str(row.get("entity", "")).strip()
+            addr_id = str(row.get("internalid", "")).strip()
+            if not entity_id or not addr_id:
+                continue
+            if str(row.get("defaultbilling", "")).upper() == "T":
+                self._bill_addr_map[entity_id] = addr_id
+            if str(row.get("defaultshipping", "")).upper() == "T":
+                self._ship_addr_map[entity_id] = addr_id
+
+        logger.info(
+            f"Address maps loaded: {len(self._bill_addr_map)} billing, "
+            f"{len(self._ship_addr_map)} shipping addresses fetched from NS."
+        )
 
     def get_external_id(self, row: dict) -> str:
         return row.get("externalId", "").strip()
@@ -51,11 +104,40 @@ class BillingAccountLoader(BaseLoader):
             )
             return None
 
+        # ── Resolve Bill/Ship Address IDs ────────────────────────────────
+        # NS requires billAddressList and shipAddressList on every billing account.
+        # We look up the customer's default billing/shipping address from the
+        # map built at init time (one SuiteQL query for all customers).
+        bill_addr_id = self._bill_addr_map.get(str(customer_ns_id))
+        ship_addr_id = self._ship_addr_map.get(str(customer_ns_id))
+
+        logger.info(
+            f"  {ext_id}: address lookup — "
+            f"customer_ns_id={customer_ns_id}, "
+            f"bill_addr={bill_addr_id}, ship_addr={ship_addr_id}"
+        )
+
+        if not bill_addr_id:
+            logger.error(
+                f"Billing account {ext_id}: no default billing address found in NS "
+                f"for customer NS ID {customer_ns_id} ({customer_ext_id}). "
+                f"Ensure the customer's addressBook was loaded with defaultBilling=true."
+            )
+            return None
+
+        if not ship_addr_id:
+            logger.error(
+                f"Billing account {ext_id}: no default shipping address found in NS "
+                f"for customer NS ID {customer_ns_id} ({customer_ext_id}). "
+                f"Ensure the customer's addressBook was loaded with defaultShipping=true."
+            )
+            return None
+
         subsidiary_id = row.get("subsidiary_id", "").strip()
         currency_id = row.get("currency_id", "").strip()
         billing_schedule_id = row.get("billingSchedule_id", "").strip()
         frequency = row.get("frequency", "").strip()
-        start_date = row.get("startDate", "").strip()
+        start_date = row.get("startDate", "").strip() or None
 
         payload = {
             "externalId": ext_id,
@@ -63,7 +145,7 @@ class BillingAccountLoader(BaseLoader):
             "customer": {"id": customer_ns_id},
             "subsidiary": {"id": subsidiary_id},
             "currency": {"id": currency_id},
-            "frequency": {"id": frequency},  # e.g. "MONTHLY"
+            "frequency": {"id": frequency},
             "startDate": start_date,
             "customerDefault": row.get("customerDefault", "").strip().lower() == "true",
             "requestOffCycleInvoice": row.get("requestOffCycleInvoice", "")
@@ -71,18 +153,14 @@ class BillingAccountLoader(BaseLoader):
             .lower()
             == "true",
             "inactive": row.get("inactive", "").strip().lower() == "true",
+            "billAddressList": {"id": bill_addr_id},
+            "shipAddressList": {"id": ship_addr_id},
         }
 
-        # Billing schedule
         if billing_schedule_id:
             payload["billingSchedule"] = {"id": billing_schedule_id}
 
-        # Bill/Ship address lists (parked — may be null)
-        bill_addr = row.get("billAddressList_parked", "").strip()
-        ship_addr = row.get("shipAddressList_parked", "").strip()
-        if bill_addr:
-            payload["billAddressList"] = {"id": bill_addr}
-        if ship_addr:
-            payload["shipAddressList"] = {"id": ship_addr}
-
+        # Remove None values (e.g. blank startDate)
+        payload = {k: v for k, v in payload.items() if v is not None}
+        logger.info(f"Billing Account Payload: {payload}")
         return payload
