@@ -125,9 +125,22 @@ class SubscriptionLoader(BaseLoader):
 
         # ── Header fields ───────────────────────────────────────────────
         subsidiary_name = header.get("Subsidiary", "").strip()
-        subsidiary_id = SUBSIDIARY_MAP.get(subsidiary_name, "12")
+        subsidiary_id = SUBSIDIARY_MAP.get(subsidiary_name)
+        if not subsidiary_id:
+            logger.error(
+                f"Subscription {ext_id}: unmapped subsidiary '{subsidiary_name}' — cannot default. "
+                f"Add it to SUBSIDIARY_MAP in loaders/subscription.py."
+            )
+            return None
+
         currency_code = header.get("Currency", "").strip()
-        currency_id = CURRENCY_MAP.get(currency_code, "1")
+        currency_id = CURRENCY_MAP.get(currency_code)
+        if not currency_id:
+            logger.error(
+                f"Subscription {ext_id}: unmapped currency '{currency_code}' — cannot default. "
+                f"Add it to CURRENCY_MAP in loaders/subscription.py."
+            )
+            return None
 
         payload = {
             "externalId": ext_id,

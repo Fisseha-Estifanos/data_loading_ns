@@ -35,6 +35,8 @@ CURRENCY_MAP = {
 
 
 class CustomerLoader(BaseLoader):
+    """Customer Loader Class"""
+
     ENTITY_TYPE = "customer"
     RECORD_TYPE = "customer"
     CSV_PATH = config.CUSTOMERS_CSV
@@ -141,8 +143,11 @@ class CustomerLoader(BaseLoader):
 
         country_code = COUNTRY_MAP.get(country_raw.lower(), "")
         if not country_code and country_raw:
-            logger.warning(f"Unmapped country: '{country_raw}', defaulting to GB")
-            country_code = "GB"
+            logger.error(
+                f"Unmapped country value '{country_raw}' — cannot default. "
+                f"Add it to COUNTRY_MAP in loaders/customer.py."
+            )
+            return None
 
         address_entry = {
             "defaultBilling": True,

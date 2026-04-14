@@ -70,12 +70,31 @@ class OneOffLoader(BaseLoader):
             return None
 
         subsidiary_name = row.get("Subsidiary", "").strip()
-        subsidiary_id = SUBSIDIARY_MAP.get(subsidiary_name, "12")
+        subsidiary_id = SUBSIDIARY_MAP.get(subsidiary_name)
+        if not subsidiary_id:
+            logger.error(
+                f"One-off {ext_id}: unmapped subsidiary '{subsidiary_name}' — cannot default. "
+                f"Add it to SUBSIDIARY_MAP in loaders/one_off.py."
+            )
+            return None
+
         currency_code = row.get("Currency", "").strip()
-        currency_id = CURRENCY_MAP.get(currency_code, "1")
+        currency_id = CURRENCY_MAP.get(currency_code)
+        if not currency_id:
+            logger.error(
+                f"One-off {ext_id}: unmapped currency '{currency_code}' — cannot default. "
+                f"Add it to CURRENCY_MAP in loaders/one_off.py."
+            )
+            return None
 
         rate = row.get("Rate per line item", "").strip()
-        quantity = row.get("Quantity", "").strip() or "1"
+        quantity = row.get("Quantity", "").strip()
+        if not quantity:
+            logger.error(
+                f"One-off {ext_id}: blank quantity — cannot default to 1. "
+                f"Ensure the source CSV has a Quantity value for this row."
+            )
+            return None
         description = row.get("Description", "").strip()
         tran_date = row.get("Date (Req)", "").strip()
         item_name = row.get("Item", "").strip()
@@ -90,7 +109,7 @@ class OneOffLoader(BaseLoader):
                 "items": [
                     {
                         "item": {"refName": item_name} if item_name and item_name != "NOT MAPPED" else None,
-                        "quantity": float(quantity) if quantity else 1,
+                        "quantity": float(quantity),
                         "rate": rate,
                         "description": description,
                     }
