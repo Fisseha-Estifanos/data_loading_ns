@@ -153,8 +153,8 @@ class BillingAccountLoader(BaseLoader):
             .lower()
             == "true",
             "inactive": row.get("inactive", "").strip().lower() == "true",
-            "billAddressList": {"id": bill_addr_id},
-            "shipAddressList": {"id": ship_addr_id},
+            "billAddressList": bill_addr_id,
+            "shipAddressList": ship_addr_id,
         }
 
         if billing_schedule_id:
