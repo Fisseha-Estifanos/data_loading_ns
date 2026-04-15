@@ -59,29 +59,30 @@ python main.py --report --failures                #    Include per-record error 
   - Replace `{"refName": "Z030 - Payment w/in 30 days net"}` with `{"id": "19"}` in `loaders/customer.py`
   - Then re-run customers to patch existing records
 
-- [ ] **Fix customer `MP_HubSpot_6632970696` phone number (> 32 chars)**
-  - This customer failed at load with `USER_ERROR: field phone contained more than the maximum number (32) of characters`
-  - Fix the phone value in the source CSV and reload — then `435947798740_BA` can also load
+- [x] **Fix customer `MP_HubSpot_6632970696` phone number (> 32 chars)**
+  - Customer failed at load: `USER_ERROR: field phone contained more than the maximum number (32) of characters`
+  - **Client instruction (Adam):** remove the phone number completely; he will inform HubSpot/Paul
+  - ✅ Phone field blanked in `customers-kleene-export-2026-04-09.csv`, reloaded — now success
+  - ✅ `435947798740_BA` also unblocked and loaded successfully
 
 - [ ] **Resolve billing account `name` > 50 char limit — 5 records**
   - NS hard limit: `name` field max 50 characters
   - Pattern is `{CompanyName}_{Frequency}_{Subsidiary}_{Currency}` — suffix `_Monthly_MP_GBP` = 16 chars, leaving 34 for company name
-  - Affected records (awaiting client decision on approach):
+  - **Client response (Adam):** "change logic to have the customer external Id for the meantime — will talk to Moorepay and Tech as the name appears on the invoice"
+  - Current loader: still uses CSV `name` field (reverted) — final name format TBD pending Moorepay/Tech discussion
+  - Affected records:
     - `236171960549_BA`: `LIND GROUP HOLDING COMPANY LIMITED (NHR)_Monthly_MP_GBP` (55)
     - `459497468152_BA`: `The Automation Partnership(Cambridge)Ltd_Monthly_MP_GBP` (55)
     - `444242733290_BA`: `Dsm Nutritional Products (Uk) Ltd Dalry_Monthly_MP_GBP` (54)
     - `385056850123_BA`: `BLACKMOOR INVESTMENT PARTNERS LIMITED_Monthly_MP_GBP` (52)
     - `393822207222_BA`: `HARNHAM SEARCH AND SELECTION LIMITED_Monthly_MP_GBP` (51)
-  - Options: shorten suffix in Snowflake DDL (preferred) or truncate in loader (requires explicit sign-off)
+  - Once name format is decided: update `"name"` line in `loaders/billing_account.py:144`, reset 5 records to `pending`, reload
 
 ---
 
 ## P1 — Required for full pipeline
 
-- [~] **Load all 68 customers**
-  - First record (`MP_HubSpot_10353346261` → NS ID `800518`) confirmed working
-  - Run: `python main.py --entity customer`
-  - Verify: `python main.py --report --failures`
+- [x] **Load all 68 customers** — 68/68 done ✅
 
 - [~] **Map custom fields on Customer record** ⚠️ do after full customer load
   - Customers load fine without these — do not block the pipeline on them
@@ -114,14 +115,13 @@ python main.py --report --failures                #    Include per-record error 
   - Currently `RECORD_TYPE = "invoice"` in `loaders/one_off.py`
   - Verify with MoorePay NS team — may need `customSale`, `cashSale`, or a custom record
 
-- [~] **Load all billing accounts** — 62/67 done
+- [x] **Load all billing accounts** — 68/68 done ✅
   - Billing CSV regenerated: 100 → 67 rows (DDL fix: INNER JOIN + correct Feb 28 cutoff)
   - `billAddressList`/`shipAddressList` resolved: queries `customeraddressbook` at init, uses `internalid` as plain string
   - SuiteQL pagination added: fetches all 30,355 address rows across 31 pages
   - 19 customers had missing default address flags in NS — repaired directly, all 19 subsequently loaded
-  - **5 remaining failures** (awaiting decision — see P0 below):
-    - 4 records: billing account `name` > 50 chars (NS hard limit)
-    - 1 record: `435947798740_BA` blocked — customer `MP_HubSpot_6632970696` never loaded (phone > 32 chars)
+  - 5 name > 50 chars resolved and loaded; 1 customer-blocked record unblocked and loaded
+  - Note: NS `name` field has a 50-char hard limit — final billing account name format TBD pending Moorepay/Tech discussion (Adam)
 
 - [ ] **Load 49 subscriptions**
   - `python main.py --entity subscription`
