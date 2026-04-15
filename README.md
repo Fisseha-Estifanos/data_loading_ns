@@ -143,8 +143,12 @@ See [TODO.md](TODO.md) for the full prioritised task list (P0 → P1 → P2).
 ### What has been completed
 
 - All imports and module resolution fixed (`loaders/` package structure)
-- Customer loader: 68 records, standard fields mapped (externalId, companyName, subsidiary, currency, email, phone, terms, addressBook)
-- Billing account loader: 100 records, resolves customer NS ID from state tracker
+- Customer loader: **67/68 records loaded into NS**. 1 failed: phone number exceeds NS 32-char limit (`MP_HubSpot_6632970696`).
+- Billing account loader: **62/67 records loaded into NS**. Full address resolution implemented (see below). 5 remain: 4 with `name` > 50 chars (NS hard limit), 1 blocked by unloaded customer.
+- Billing CSV regenerated: original 100-row export had DDL filter mismatch (LEFT JOIN + wrong date cutoff) producing ghost rows. Regenerated with correct INNER JOIN and Feb 28 cutoff → 67 rows, all matching loaded customers.
+- `billAddressList` / `shipAddressList` resolution: NS requires both on every billing account POST. Added `_load_address_maps()` to `BillingAccountLoader.__init__` — queries `customeraddressbook` once at startup via SuiteQL and builds a `customer_ns_id → addressbook_internalid` map. Key finding: the field expects a **plain string** (the `internalid` from `customeraddressbook`), not a nested `{"id": "..."}` object. Confirmed by GET-ing an existing billingAccount in NS.
+- SuiteQL pagination: `suiteql_query()` now paginates via `?limit=1000&offset=N` until `hasMore=false` (30,355 address rows across 31 pages).
+- 19 customers loaded without default address flags: NS silently accepted the customer records but dropped `defaultBilling`/`defaultShipping`. These were identified via address map misses and repaired directly in NS. All 19 billing accounts subsequently loaded.
 - Subscription loader: groups 70 CSV rows into 49 unique subscriptions with nested lines; resolves customer + billing account references
 - One-off loader: 26 records, resolves customer by name
 - CLI orchestrator: `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`

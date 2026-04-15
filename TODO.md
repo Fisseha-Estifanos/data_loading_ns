@@ -59,6 +59,21 @@ python main.py --report --failures                #    Include per-record error 
   - Replace `{"refName": "Z030 - Payment w/in 30 days net"}` with `{"id": "19"}` in `loaders/customer.py`
   - Then re-run customers to patch existing records
 
+- [ ] **Fix customer `MP_HubSpot_6632970696` phone number (> 32 chars)**
+  - This customer failed at load with `USER_ERROR: field phone contained more than the maximum number (32) of characters`
+  - Fix the phone value in the source CSV and reload — then `435947798740_BA` can also load
+
+- [ ] **Resolve billing account `name` > 50 char limit — 5 records**
+  - NS hard limit: `name` field max 50 characters
+  - Pattern is `{CompanyName}_{Frequency}_{Subsidiary}_{Currency}` — suffix `_Monthly_MP_GBP` = 16 chars, leaving 34 for company name
+  - Affected records (awaiting client decision on approach):
+    - `236171960549_BA`: `LIND GROUP HOLDING COMPANY LIMITED (NHR)_Monthly_MP_GBP` (55)
+    - `459497468152_BA`: `The Automation Partnership(Cambridge)Ltd_Monthly_MP_GBP` (55)
+    - `444242733290_BA`: `Dsm Nutritional Products (Uk) Ltd Dalry_Monthly_MP_GBP` (54)
+    - `385056850123_BA`: `BLACKMOOR INVESTMENT PARTNERS LIMITED_Monthly_MP_GBP` (52)
+    - `393822207222_BA`: `HARNHAM SEARCH AND SELECTION LIMITED_Monthly_MP_GBP` (51)
+  - Options: shorten suffix in Snowflake DDL (preferred) or truncate in loader (requires explicit sign-off)
+
 ---
 
 ## P1 — Required for full pipeline
@@ -99,9 +114,14 @@ python main.py --report --failures                #    Include per-record error 
   - Currently `RECORD_TYPE = "invoice"` in `loaders/one_off.py`
   - Verify with MoorePay NS team — may need `customSale`, `cashSale`, or a custom record
 
-- [ ] **Load all 100 billing accounts**
-  - `python main.py --entity billingAccount`
-  - Verify: `python main.py --report --failures`
+- [~] **Load all billing accounts** — 62/67 done
+  - Billing CSV regenerated: 100 → 67 rows (DDL fix: INNER JOIN + correct Feb 28 cutoff)
+  - `billAddressList`/`shipAddressList` resolved: queries `customeraddressbook` at init, uses `internalid` as plain string
+  - SuiteQL pagination added: fetches all 30,355 address rows across 31 pages
+  - 19 customers had missing default address flags in NS — repaired directly, all 19 subsequently loaded
+  - **5 remaining failures** (awaiting decision — see P0 below):
+    - 4 records: billing account `name` > 50 chars (NS hard limit)
+    - 1 record: `435947798740_BA` blocked — customer `MP_HubSpot_6632970696` never loaded (phone > 32 chars)
 
 - [ ] **Load 49 subscriptions**
   - `python main.py --entity subscription`
