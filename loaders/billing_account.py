@@ -52,6 +52,7 @@ class BillingAccountLoader(BaseLoader):
                 "SELECT internalid, entity, defaultbilling, defaultshipping "
                 "FROM customeraddressbook "
                 "WHERE defaultbilling = 'T' OR defaultshipping = 'T'"
+                "ORDER BY entity, internalid"
             )
         except Exception as e:
             logger.error(
