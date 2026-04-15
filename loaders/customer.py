@@ -142,12 +142,19 @@ class CustomerLoader(BaseLoader):
             return None
 
         country_code = COUNTRY_MAP.get(country_raw.lower(), "")
-        if not country_code and country_raw:
-            logger.error(
-                f"Unmapped country value '{country_raw}' — cannot default. "
-                f"Add it to COUNTRY_MAP in loaders/customer.py."
+        # if not country_code and country_raw:
+        #     logger.error(
+        #         f"Unmapped country value '{country_raw}' — cannot default. "
+        #         f"Add it to COUNTRY_MAP in loaders/customer.py."
+        #     )
+        #     return None
+        if not country_code:
+            subsidiary = row.get("Primary Entity (Req)", "").strip()
+            country_code = "IE" if subsidiary == "66" else "GB"
+            logger.warning(
+                f"Country '{country_raw or '(blank)'}' → defaulted to {country_code} "
+                f"(subsidiary={subsidiary})"
             )
-            return None
 
         address_entry = {
             "defaultBilling": True,
