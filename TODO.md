@@ -34,6 +34,7 @@ python main.py --report --failures                #    Include per-record error 
 | `--report`         | Print load state summary. Also prints field mapping. No loading.                         |
 | `--failures`       | Add per-record error details to `--report` output                                        |
 | `--field-map`      | Print CSV column → NetSuite API field mapping for all loaders. No credentials needed     |
+| `--patch`          | PATCH existing customer records with custom fields (use with `--entity customer`)        |
 
 ---
 
