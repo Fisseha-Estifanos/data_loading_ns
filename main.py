@@ -628,6 +628,11 @@ def main():
         action="store_true",
         help="PATCH existing customer records with custom fields (use with --entity customer)",
     )
+    parser.add_argument(
+        "--patch-eer",
+        action="store_true",
+        help="Create Electronic Email Recipient records and link to customers (customer only)",
+    )
     args = parser.parse_args()
 
     log_file = setup_logging()
@@ -671,6 +676,24 @@ def _run(args, logger):
             if not preflight_check(client):
                 logger.error("Preflight failed. Fix auth/connectivity and retry.")
                 sys.exit(1)
+
+        # ── EER patch mode ──────────────────────────────────────────────
+        if args.patch_eer:
+            if args.entity and args.entity != "customer":
+                logger.error("--patch-eer only supports --entity customer")
+                sys.exit(1)
+            loader = CustomerLoader(client, tracker)
+            result = loader.patch_eer_all(
+                dry_run=args.dry_run,
+                limit=args.limit,
+            )
+            lines = ["\n" + "=" * 70, "  EER PATCH COMPLETE — SUMMARY", "=" * 70]
+            for key in ("total", "with_email", "success", "failed", "skipped"):
+                if key in result:
+                    lines.append(f"    {key:20s}: {result[key]}")
+            lines.append("=" * 70)
+            logger.info("\n".join(lines))
+            return
 
         # ── Patch mode ───────────────────────────────────────────────────
         if args.patch:

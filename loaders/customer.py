@@ -290,6 +290,116 @@ class CustomerLoader(BaseLoader):
         logger.info(f"=== customer patch complete: {summary} ===")
         return summary
 
+    def patch_eer_all(self, dry_run: bool = False, limit: int = None) -> dict:
+        """
+        Two-step process for custentity_zellis_elec_email_recipients:
+          1. POST customrecord_zellis_elec_email_recipient (externalId={ext_id}_EER, email1=csv_value)
+          2. PATCH customer: custentity_zellis_elec_email_recipients → {"id": "<eer_record_id>"}
+
+        CSV column: 'Electronic Email Recipients' — 63/68 rows have a value.
+        5 blank rows are skipped.
+        ExternalId on the EER record makes re-runs idempotent (already-exists path returns the
+        existing ID and the PATCH is simply re-applied with the same value).
+        """
+        EER_RECORD_TYPE = "customrecord_zellis_elec_email_recipient"
+
+        rows = self.read_csv()
+        if limit is not None:
+            rows = rows[:limit]
+        total = len(rows)
+        success = 0
+        failed = 0
+        skipped = 0
+
+        with_email = sum(
+            1 for r in rows if r.get("Electronic Email Recipients", "").strip()
+        )
+        logger.info(
+            f"=== EER patch: {with_email}/{total} customers have email values ==="
+        )
+
+        for i, row in enumerate(rows, 1):
+            ext_id = self.get_external_id(row)
+            company_name = row.get("Company Name", "").strip()
+            email = row.get("Electronic Email Recipients", "").strip()
+
+            if not ext_id:
+                skipped += 1
+                continue
+
+            if not email:
+                logger.info(
+                    f"[{i}/{total}] SKIP {ext_id}: no Electronic Email Recipients value"
+                )
+                skipped += 1
+                continue
+
+            eer_ext_id = f"{ext_id}_EER"
+
+            if dry_run:
+                logger.info(
+                    f"[{i}/{total}] DRY RUN EER {ext_id}:\n"
+                    f"  POST {EER_RECORD_TYPE}: externalId={eer_ext_id}, "
+                    f"name={company_name!r}, email={email!r}\n"
+                    f"  PATCH customer: custentity_zellis_elec_email_recipients -> {{id: <eer_id>}}"
+                )
+                success += 1
+                continue
+
+            logger.info(f"[{i}/{total}] Creating EER record for {ext_id} ({email})")
+
+            # Step 1: Create (or recover existing) EER record
+            # Use eer_ext_id as name (not company_name) — NS enforces unique names across
+            # all ~3000 existing EER records, and company names collide with them.
+            eer_payload = {
+                "externalId": eer_ext_id,
+                "name": eer_ext_id,
+                "custrecord_zellis_eer_email1": email,
+            }
+            status, eer_id, error = self.client.create_and_resolve_id(
+                record_type=EER_RECORD_TYPE,
+                payload=eer_payload,
+                external_id=eer_ext_id,
+                tier3_field=None,
+                tier3_value=None,
+            )
+
+            if status == "failed" or not eer_id:
+                logger.error(f"  ✗ EER create failed for {ext_id}: {error}")
+                failed += 1
+                continue
+
+            logger.info(f"  EER record id={eer_id}")
+
+            # Step 2: PATCH customer to link the EER record
+            resp = self.client.patch_record(
+                self.RECORD_TYPE,
+                ext_id,
+                {"custentity_zellis_elec_email_recipients": {"id": eer_id}},
+            )
+
+            if resp.status_code in (200, 204):
+                logger.info(
+                    f"  ✓ EER linked: {ext_id} → eer_id={eer_id} (HTTP {resp.status_code})"
+                )
+                success += 1
+            else:
+                logger.error(
+                    f"  ✗ PATCH failed for {ext_id}: "
+                    f"HTTP {resp.status_code}: {resp.text[:300]}"
+                )
+                failed += 1
+
+        summary = {
+            "total": total,
+            "with_email": with_email,
+            "success": success,
+            "failed": failed,
+            "skipped": skipped,
+        }
+        logger.info(f"=== EER patch complete: {summary} ===")
+        return summary
+
     def _build_address(self, row: dict) -> Optional[dict]:
         """Build a NetSuite addressBook entry from CSV address fields."""
         addr1 = row.get("Address 1 : Address 1", "").strip()

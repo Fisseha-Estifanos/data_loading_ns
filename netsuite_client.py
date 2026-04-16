@@ -349,7 +349,10 @@ class NetSuiteClient:
         if resp.status_code not in (200, 201, 204):
             # Special case: NS says the record already exists (e.g. from a prior async 202 run).
             # Treat as a successful create — look up the existing record's ID via Tier 2/3.
-            if resp.status_code == 400 and "already exists" in resp.text:
+            if resp.status_code == 400 and (
+                "already exists" in resp.text
+                or "already a Custom Record Entry" in resp.text
+            ):
                 logger.warning(
                     f"{record_type} '{external_id}' already exists in NS — looking up existing ID"
                 )
