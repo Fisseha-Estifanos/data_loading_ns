@@ -163,5 +163,4 @@ class BillingAccountLoader(BaseLoader):
 
         # Remove None values (e.g. blank startDate)
         payload = {k: v for k, v in payload.items() if v is not None}
-        logger.info(f"Billing Account Payload: {payload}")
         return payload

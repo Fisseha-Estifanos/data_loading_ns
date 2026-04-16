@@ -141,5 +141,4 @@ class OneOffLoader(BaseLoader):
         ]
 
         payload = {k: v for k, v in payload.items() if v is not None}
-        logger.info(f"One Off Payload: {payload}")
         return payload
