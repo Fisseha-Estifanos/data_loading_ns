@@ -84,18 +84,22 @@ python main.py --report --failures                #    Include per-record error 
 
 - [x] **Load all 68 customers** — 68/68 done ✅
 
-- [~] **Map custom fields on Customer record** ⚠️ do after full customer load
-  - Customers load fine without these — do not block the pipeline on them
-  - **Confirmed script IDs + types (from live GET on customer/800518):**
-    - `custentity_2663_direct_debit` → bool
-    - `custentity_3805_dunning_letters_toemail` → bool (Allow Letters to be Emailed)
-    - `custentity_zellis_po_mandatory` → bool (PO Mandatory)
-    - `custentity_3805_dunning_procedure` → linked record (`{"id": "..."}`) — **NS value ID needed**
-    - `cseg_busclass` → linked record (`{"id": "..."}`) — "Managed Services" = ID `1` ✅
-  - **Awaiting client response** (sent message requesting these):
-    - Labels for `custentity6`, `custentity9`, `custentity15_2`, `custentity19`, `custentity376` → needed to identify Company Reg Number, Segment, Dunning Contact, Dunning Level, Email Preference, Electronic Email Recipients, Indexation Date
-    - NS internal ID for the correct MoorePay Dunning Procedure value (`customrecord_3805_dunning_procedure` is not queryable via SuiteQL — NS UI lookup needed)
-  - Once client responds: add confirmed mappings to `loaders/customer.py` and re-run to patch existing records
+- [x] **Map custom fields on Customer record** — 9 fields patched across all 68 customers ✅
+  - All 68 PATCHed (HTTP 204) on 2026-04-15. `python main.py --entity customer --patch`
+  - Fields now set on every customer:
+    - `cseg_busclass` → `{"id": "1"}` (Managed Services) ✅
+    - `cseg_segment` → `{"id": "2"}` (Moorepay) ✅
+    - `custentity_3805_dunning_procedure` → `{"id": "6"}` ✅
+    - `custentity_3805_dunning_letters_toemail` → `true` ✅
+    - `emailpreference` → `"PDF"` ✅
+    - `custentity_alf_company_reg_num` → from CSV `Company Reg Number` ✅
+    - `custentityindexationdatecustomer` → from CSV `Indexation Date` (date only) ✅
+    - `custentity_zellis_po_mandatory` → from CSV `PO Mandatory` ✅
+    - `custentity_2663_direct_debit` → from CSV `Direct Debit` ✅
+  - **Still deferred (awaiting client / Phase 2):**
+    - `custentity_3805_dunning_level` — can't resolve "Level 1 and Above" ID via SuiteQL/REST; NS UI lookup needed
+    - `custentity_zellis_elec_email_recipients` — Phase 2: requires creating a `customrecord_zellis_elec_email_recipient` record then linking
+    - Dunning Contact First/Last Name — awaiting client mapping for `custentity6/9/15_2/19/376`
 
 - [ ] **Resolve subscription plan internal IDs**
   - `loaders/subscription.py` uses `{"refName": "HR Services rolling (LPG)"}` etc.

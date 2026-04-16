@@ -97,7 +97,9 @@ def preflight_check(client: NetSuiteClient) -> bool:
         url = f"{config.BASE_URL}/customer"
         resp = client._request("GET", url + "?limit=1")
         if resp.status_code < 300:
-            logger.info(f"✓ Preflight passed (HTTP {resp.status_code}). Connected to {config.REALM}")
+            logger.info(
+                f"✓ Preflight passed (HTTP {resp.status_code}). Connected to {config.REALM}"
+            )
             return True
         else:
             logger.error(
@@ -134,94 +136,337 @@ FIELD_MAPS = {
         "endpoint": "POST /record/v1/customer",
         "csv_file": "customers CSV",
         "fields": [
-            ("External ID 2",                  "externalId",                              "direct",       "str",       ""),
-            ("Company Name",                   "companyName",                             "direct",       "str",       ""),
-            (None,                             "isPerson",                                "hardcoded",    "bool",      "Always False (company records)"),
-            ("Primary Entity (Req)",           "subsidiary.id",                           "{id}",         "str",       "NS internal ID taken as-is from CSV"),
-            ("Currency",                       "currency.id",                             "{id}+map",     "str",       "GBP→1, EUR→4 via CURRENCY_MAP"),
-            ("Email",                          "email",                                   "direct|omit",  "str",       "Omitted if blank"),
-            ("Phone",                          "phone",                                   "direct|omit",  "str",       "Omitted if blank"),
-            ("Alt. Phone",                     "altPhone",                                "direct|omit",  "str",       "Omitted if blank"),
-            ("Terms",                          "terms.refName",                           "{refName}",    "str",       "⚠ refName lookup — may need ID instead"),
-            ("Job Title",                      "title",                                   "direct|omit",  "str",       "Omitted if blank"),
-            ("Address 1 : Address 1",          "addressBook[0].addr1",                   "direct|omit",  "str",       "Nested in addressBook.items[0].addressBookAddress"),
-            ("Address 1 : Address 2",          "addressBook[0].addr2",                   "direct|omit",  "str",       ""),
-            ("Address 1 : City",               "addressBook[0].city",                    "direct|omit",  "str",       ""),
-            ("Address 1 : County",             "addressBook[0].state",                   "direct|omit",  "str",       ""),
-            ("Address 1 : Post Code",          "addressBook[0].zip",                     "direct|omit",  "str",       ""),
-            ("Address 1 : Country (Req) 1",    "addressBook[0].country.id",              "{id}+map",     "str",       "Display name→ISO code via COUNTRY_MAP (e.g. 'united kingdom'→'GB')"),
-            ("addressee",                      "addressBook[0].addressee",               "direct|omit",  "str",       ""),
-            ("Attention First Name",           "addressBook[0].attention",               "computed",     "str",       "Joined as 'First Last'; omitted if both blank"),
-            ("Attention Last Name",            "addressBook[0].attention",               "computed",     "str",       "See above — combined with First Name"),
+            ("External ID 2", "externalId", "direct", "str", ""),
+            ("Company Name", "companyName", "direct", "str", ""),
+            (None, "isPerson", "hardcoded", "bool", "Always False (company records)"),
+            (
+                "Primary Entity (Req)",
+                "subsidiary.id",
+                "{id}",
+                "str",
+                "NS internal ID taken as-is from CSV",
+            ),
+            (
+                "Currency",
+                "currency.id",
+                "{id}+map",
+                "str",
+                "GBP→1, EUR→4 via CURRENCY_MAP",
+            ),
+            ("Email", "email", "direct|omit", "str", "Omitted if blank"),
+            ("Phone", "phone", "direct|omit", "str", "Omitted if blank"),
+            ("Alt. Phone", "altPhone", "direct|omit", "str", "Omitted if blank"),
+            (
+                "Terms",
+                "terms.refName",
+                "{refName}",
+                "str",
+                "⚠ refName lookup — may need ID instead",
+            ),
+            ("Job Title", "title", "direct|omit", "str", "Omitted if blank"),
+            (
+                "Address 1 : Address 1",
+                "addressBook[0].addr1",
+                "direct|omit",
+                "str",
+                "Nested in addressBook.items[0].addressBookAddress",
+            ),
+            ("Address 1 : Address 2", "addressBook[0].addr2", "direct|omit", "str", ""),
+            ("Address 1 : City", "addressBook[0].city", "direct|omit", "str", ""),
+            ("Address 1 : County", "addressBook[0].state", "direct|omit", "str", ""),
+            ("Address 1 : Post Code", "addressBook[0].zip", "direct|omit", "str", ""),
+            (
+                "Address 1 : Country (Req) 1",
+                "addressBook[0].country.id",
+                "{id}+map",
+                "str",
+                "Display name→ISO code via COUNTRY_MAP (e.g. 'united kingdom'→'GB')",
+            ),
+            ("addressee", "addressBook[0].addressee", "direct|omit", "str", ""),
+            (
+                "Attention First Name",
+                "addressBook[0].attention",
+                "computed",
+                "str",
+                "Joined as 'First Last'; omitted if both blank",
+            ),
+            (
+                "Attention Last Name",
+                "addressBook[0].attention",
+                "computed",
+                "str",
+                "See above — combined with First Name",
+            ),
+            # ── Custom fields (confirmed NS IDs) ────────────────────────
+            (
+                "Business/Class",
+                "cseg_busclass.id",
+                "{id}+map",
+                "str",
+                "Managed Services→1 via BUSCLASS_MAP",
+            ),
+            (
+                "Segment",
+                "cseg_segment.id",
+                "{id}+map",
+                "str",
+                "Moorepay→2 via SEGMENT_MAP",
+            ),
+            (
+                "Dunning Procedure",
+                "custentity_3805_dunning_procedure.id",
+                "{id}+map",
+                "str",
+                "Moorepay | Dunning Procedure→6 via DUNNING_PROCEDURE_MAP",
+            ),
+            (
+                "Allow Letters to be Emailed",
+                "custentity_3805_dunning_letters_toemail",
+                "bool_coerce",
+                "bool",
+                "Y→True",
+            ),
+            (
+                "Email Preference",
+                "emailpreference",
+                "direct|omit",
+                "str",
+                "PDF passed as plain string",
+            ),
+            (
+                "Company Reg Number",
+                "custentity_alf_company_reg_num",
+                "direct|omit",
+                "str",
+                "",
+            ),
+            (
+                "Indexation Date",
+                "custentityindexationdatecustomer",
+                "computed",
+                "str",
+                "ISO datetime → date only (strip T00:00:00Z)",
+            ),
+            (
+                "PO Mandatory",
+                "custentity_zellis_po_mandatory",
+                "bool_coerce",
+                "bool",
+                "Y→True",
+            ),
+            (
+                "Direct Debit",
+                "custentity_2663_direct_debit",
+                "bool_coerce",
+                "bool",
+                "Y→True",
+            ),
         ],
         "not_sent": [
-            "Company Reg Number", "Segment", "Direct Debit", "Business/Class",
-            "Dunning Procedure", "Dunning Contact First Name", "Dunning Contact Last Name",
-            "Dunning Level (Req)", "Email Preference", "Allow Letters to be Emailed",
-            "Electronic Email Recipients", "Indexation Date", "PO Mandatory",
+            "Dunning Contact First Name",
+            "Dunning Contact Last Name",
+            "Dunning Level (Req) — awaiting NS ID from client",
+            "Electronic Email Recipients — Phase 2 (linked record)",
         ],
     },
-
     "billingAccount": {
         "endpoint": "POST /record/v1/billingAccount",
         "csv_file": "billing CSV",
         "fields": [
-            ("externalId",                     "externalId",                              "direct",       "str",       ""),
-            ("name",                           "name",                                    "direct",       "str",       ""),
-            ("customer_externalId",            "customer.id",                             "resolved",     "str",       "Looked up from state tracker using customer externalId → NS internal ID"),
-            ("subsidiary_id",                  "subsidiary.id",                           "{id}",         "str",       "Already NS internal ID in CSV"),
-            ("currency_id",                    "currency.id",                             "{id}",         "str",       "Already NS internal ID in CSV"),
-            ("billingSchedule_id",             "billingSchedule.id",                      "{id}|omit",    "str",       "Omitted if blank"),
-            ("frequency",                      "frequency.id",                            "{id}",         "str",       "e.g. 'MONTHLY'"),
-            ("startDate",                      "startDate",                               "direct",       "str",       "ISO date string"),
-            ("customerDefault",                "customerDefault",                         "bool_coerce",  "bool",      "CSV 'true'/'false' string → Python bool"),
-            ("requestOffCycleInvoice",         "requestOffCycleInvoice",                  "bool_coerce",  "bool",      ""),
-            ("inactive",                       "inactive",                                "bool_coerce",  "bool",      ""),
-            ("billAddressList_parked",         "billAddressList.id",                      "{id}|omit",    "str",       "⚠ Mostly null in data"),
-            ("shipAddressList_parked",         "shipAddressList.id",                      "{id}|omit",    "str",       "⚠ Mostly null in data"),
+            ("externalId", "externalId", "direct", "str", ""),
+            ("name", "name", "direct", "str", ""),
+            (
+                "customer_externalId",
+                "customer.id",
+                "resolved",
+                "str",
+                "Looked up from state tracker using customer externalId → NS internal ID",
+            ),
+            (
+                "subsidiary_id",
+                "subsidiary.id",
+                "{id}",
+                "str",
+                "Already NS internal ID in CSV",
+            ),
+            (
+                "currency_id",
+                "currency.id",
+                "{id}",
+                "str",
+                "Already NS internal ID in CSV",
+            ),
+            (
+                "billingSchedule_id",
+                "billingSchedule.id",
+                "{id}|omit",
+                "str",
+                "Omitted if blank",
+            ),
+            ("frequency", "frequency.id", "{id}", "str", "e.g. 'MONTHLY'"),
+            ("startDate", "startDate", "direct", "str", "ISO date string"),
+            (
+                "customerDefault",
+                "customerDefault",
+                "bool_coerce",
+                "bool",
+                "CSV 'true'/'false' string → Python bool",
+            ),
+            (
+                "requestOffCycleInvoice",
+                "requestOffCycleInvoice",
+                "bool_coerce",
+                "bool",
+                "",
+            ),
+            ("inactive", "inactive", "bool_coerce", "bool", ""),
+            (
+                "billAddressList_parked",
+                "billAddressList.id",
+                "{id}|omit",
+                "str",
+                "⚠ Mostly null in data",
+            ),
+            (
+                "shipAddressList_parked",
+                "shipAddressList.id",
+                "{id}|omit",
+                "str",
+                "⚠ Mostly null in data",
+            ),
         ],
         "not_sent": [],
     },
-
     "subscription": {
         "endpoint": "POST /record/v1/subscription",
         "csv_file": "subscriptions CSV (70 rows → 49 grouped subscriptions)",
         "fields": [
-            ("External ID",                    "externalId",                              "direct",       "str",       "Deal ID; one subscription per unique External ID"),
-            ("Subscription Name",              "name",                                    "direct",       "str",       ""),
-            ("Customer",                       "customer.id",                             "resolved",     "str",       "Company name→customer extId→state tracker→NS internal ID"),
-            ("Subsidiary",                     "subsidiary.id",                           "{id}+map",     "str",       "Display name→NS ID via SUBSIDIARY_MAP (Moorepay Ltd→12, Ireland→66)"),
-            ("Currency",                       "currency.id",                             "{id}+map",     "str",       "GBP→1, EUR→4 via CURRENCY_MAP"),
-            ("Start Date",                     "startDate",                               "direct",       "str",       "ISO date string"),
-            ("End Date",                       "endDate",                                 "direct|omit",  "str",       "Omitted if blank"),
-            ("Initial Term",                   "initialTerm",                             "direct|omit",  "str",       "Omitted if blank"),
-            (None,                             "billingAccount.id",                       "resolved",     "str",       "Looked up as {ext_id}_BA from state tracker; omitted if not found"),
-            ("Subscription Plan",              "subscriptionPlan.refName",                "{refName}|omit","str",      "⚠ refName lookup — needs NS ID resolved"),
-            ("Price Book",                     "priceBook.refName",                       "{refName}|omit","str",      "Omitted if blank or 'NOT MAPPED'"),
-            ("PO#",                            "poNumber",                                "direct|omit",  "str",       "Omitted if blank"),
+            (
+                "External ID",
+                "externalId",
+                "direct",
+                "str",
+                "Deal ID; one subscription per unique External ID",
+            ),
+            ("Subscription Name", "name", "direct", "str", ""),
+            (
+                "Customer",
+                "customer.id",
+                "resolved",
+                "str",
+                "Company name→customer extId→state tracker→NS internal ID",
+            ),
+            (
+                "Subsidiary",
+                "subsidiary.id",
+                "{id}+map",
+                "str",
+                "Display name→NS ID via SUBSIDIARY_MAP (Moorepay Ltd→12, Ireland→66)",
+            ),
+            (
+                "Currency",
+                "currency.id",
+                "{id}+map",
+                "str",
+                "GBP→1, EUR→4 via CURRENCY_MAP",
+            ),
+            ("Start Date", "startDate", "direct", "str", "ISO date string"),
+            ("End Date", "endDate", "direct|omit", "str", "Omitted if blank"),
+            ("Initial Term", "initialTerm", "direct|omit", "str", "Omitted if blank"),
+            (
+                None,
+                "billingAccount.id",
+                "resolved",
+                "str",
+                "Looked up as {ext_id}_BA from state tracker; omitted if not found",
+            ),
+            (
+                "Subscription Plan",
+                "subscriptionPlan.refName",
+                "{refName}|omit",
+                "str",
+                "⚠ refName lookup — needs NS ID resolved",
+            ),
+            (
+                "Price Book",
+                "priceBook.refName",
+                "{refName}|omit",
+                "str",
+                "Omitted if blank or 'NOT MAPPED'",
+            ),
+            ("PO#", "poNumber", "direct|omit", "str", "Omitted if blank"),
             # Line items (one per CSV row in the group)
-            ("Sales Item",                     "subscriptionLine[n].item.refName",        "{refName}",    "str",       "⚠ refName lookup — needs NS ID; row skipped if 'NOT MAPPED'"),
-            ("Lines: Include",                 "subscriptionLine[n].include",             "computed",     "bool",      "CSV 'T' → True, else False"),
-            (None,                             "subscriptionLine[n].subscriptionLineType","hardcoded",    "str",       "Always '1' (standard line type)"),
+            (
+                "Sales Item",
+                "subscriptionLine[n].item.refName",
+                "{refName}",
+                "str",
+                "⚠ refName lookup — needs NS ID; row skipped if 'NOT MAPPED'",
+            ),
+            (
+                "Lines: Include",
+                "subscriptionLine[n].include",
+                "computed",
+                "bool",
+                "CSV 'T' → True, else False",
+            ),
+            (
+                None,
+                "subscriptionLine[n].subscriptionLineType",
+                "hardcoded",
+                "str",
+                "Always '1' (standard line type)",
+            ),
         ],
         "not_sent": [
-            "CPI Type", "Default Renewal Term", "Indexation Date",
+            "CPI Type",
+            "Default Renewal Term",
+            "Indexation Date",
         ],
     },
-
     "oneOff": {
         "endpoint": "POST /record/v1/invoice",
         "csv_file": "one-off CSV",
         "fields": [
-            ("Invoice External ID",            "externalId",                              "direct",       "str",       ""),
-            ("Customer (Req)",                 "entity.id",                               "resolved",     "str",       "Company name→customer extId→state tracker→NS internal ID"),
-            ("Subsidiary",                     "subsidiary.id",                           "{id}+map",     "str",       "Display name→NS ID via SUBSIDIARY_MAP"),
-            ("Currency",                       "currency.id",                             "{id}+map",     "str",       "GBP→1, EUR→4 via CURRENCY_MAP"),
-            ("Date (Req)",                     "tranDate",                                "direct",       "str",       "ISO date string"),
-            ("Item",                           "item.items[0].item.refName",              "{refName}|omit","str",      "⚠ refName lookup; omitted if blank or 'NOT MAPPED'"),
-            ("Quantity",                       "item.items[0].quantity",                  "direct",       "float",     "Parsed as float; record skipped if blank"),
-            ("Rate per line item",             "item.items[0].rate",                      "direct",       "str",       ""),
-            ("Description",                    "item.items[0].description",               "direct|omit",  "str",       ""),
+            ("Invoice External ID", "externalId", "direct", "str", ""),
+            (
+                "Customer (Req)",
+                "entity.id",
+                "resolved",
+                "str",
+                "Company name→customer extId→state tracker→NS internal ID",
+            ),
+            (
+                "Subsidiary",
+                "subsidiary.id",
+                "{id}+map",
+                "str",
+                "Display name→NS ID via SUBSIDIARY_MAP",
+            ),
+            (
+                "Currency",
+                "currency.id",
+                "{id}+map",
+                "str",
+                "GBP→1, EUR→4 via CURRENCY_MAP",
+            ),
+            ("Date (Req)", "tranDate", "direct", "str", "ISO date string"),
+            (
+                "Item",
+                "item.items[0].item.refName",
+                "{refName}|omit",
+                "str",
+                "⚠ refName lookup; omitted if blank or 'NOT MAPPED'",
+            ),
+            (
+                "Quantity",
+                "item.items[0].quantity",
+                "direct",
+                "float",
+                "Parsed as float; record skipped if blank",
+            ),
+            ("Rate per line item", "item.items[0].rate", "direct", "str", ""),
+            ("Description", "item.items[0].description", "direct|omit", "str", ""),
         ],
         "not_sent": [
             "Revenue Start Date Per Line Item",
@@ -238,12 +483,16 @@ def print_field_mapping_report():
     lines = []
     lines.append("\n" + "═" * 90)
     lines.append("  PAYLOAD FIELD MAPPING REPORT")
-    lines.append("  Which CSV columns are sent to each NetSuite endpoint, how they are passed,")
+    lines.append(
+        "  Which CSV columns are sent to each NetSuite endpoint, how they are passed,"
+    )
     lines.append("  and what field names and types are used in the API payload.")
     lines.append("═" * 90)
 
     for entity, spec in FIELD_MAPS.items():
-        lines.append(f"\n── {entity.upper()}  ({spec['endpoint']}) {'─' * max(0, 72 - len(entity) - len(spec['endpoint']))}")
+        lines.append(
+            f"\n── {entity.upper()}  ({spec['endpoint']}) {'─' * max(0, 72 - len(entity) - len(spec['endpoint']))}"
+        )
         lines.append(f"   Source: {spec['csv_file']}")
         lines.append("")
 
@@ -266,16 +515,22 @@ def print_field_mapping_report():
 
     lines.append("\n" + "─" * 90)
     lines.append("  Format key:")
-    lines.append('    direct         Raw string value from CSV, no transformation')
-    lines.append('    direct|omit    Raw string; field omitted entirely if blank')
+    lines.append("    direct         Raw string value from CSV, no transformation")
+    lines.append("    direct|omit    Raw string; field omitted entirely if blank")
     lines.append('    {id}           Wrapped as {"id": value}')
-    lines.append('    {id}+map       Value passed through a lookup map, then wrapped as {"id": ...}')
+    lines.append(
+        '    {id}+map       Value passed through a lookup map, then wrapped as {"id": ...}'
+    )
     lines.append('    {refName}      Wrapped as {"refName": value}')
     lines.append('    {id}|omit      Wrapped as {"id": value} but omitted if blank')
     lines.append('    bool_coerce    CSV string "true"/"false" coerced to Python bool')
-    lines.append('    hardcoded      Not from CSV; fixed value in code')
-    lines.append('    computed       Derived from multiple columns or conditional logic')
-    lines.append('    resolved       NS internal ID looked up from state tracker (parent entity)')
+    lines.append("    hardcoded      Not from CSV; fixed value in code")
+    lines.append(
+        "    computed       Derived from multiple columns or conditional logic"
+    )
+    lines.append(
+        "    resolved       NS internal ID looked up from state tracker (parent entity)"
+    )
     lines.append("═" * 90 + "\n")
 
     output = "\n".join(lines)
@@ -337,6 +592,7 @@ def print_report(tracker: StateTracker, show_failures: bool = False):
 
 
 def main():
+    """The main entry point for the NetSuite Data Loader."""
     parser = argparse.ArgumentParser(description="NetSuite Data Loader")
     parser.add_argument(
         "--entity", choices=ENTITY_ORDER, help="Load only this entity type"
@@ -348,8 +604,9 @@ def main():
         "--failures", action="store_true", help="Include failure details in report"
     )
     parser.add_argument(
-        "--field-map", action="store_true",
-        help="Print the CSV column → API field mapping report for all loaders"
+        "--field-map",
+        action="store_true",
+        help="Print the CSV column → API field mapping report for all loaders",
     )
     parser.add_argument(
         "--skip-preflight", action="store_true", help="Skip auth preflight check"
@@ -365,6 +622,11 @@ def main():
         default=None,
         metavar="N",
         help="Process only the first N records (useful for testing a single POST)",
+    )
+    parser.add_argument(
+        "--patch",
+        action="store_true",
+        help="PATCH existing customer records with custom fields (use with --entity customer)",
     )
     args = parser.parse_args()
 
@@ -409,6 +671,24 @@ def _run(args, logger):
             if not preflight_check(client):
                 logger.error("Preflight failed. Fix auth/connectivity and retry.")
                 sys.exit(1)
+
+        # ── Patch mode ───────────────────────────────────────────────────
+        if args.patch:
+            if args.entity and args.entity != "customer":
+                logger.error("--patch currently only supports --entity customer")
+                sys.exit(1)
+            loader = CustomerLoader(client, tracker)
+            result = loader.patch_all(
+                dry_run=args.dry_run,
+                limit=args.limit,
+            )
+            lines = ["\n" + "=" * 70, "  PATCH COMPLETE — SUMMARY", "=" * 70]
+            for key in ("total", "success", "failed", "skipped"):
+                if key in result:
+                    lines.append(f"    {key:20s}: {result[key]}")
+            lines.append("=" * 70)
+            logger.info("\n".join(lines))
+            return
 
         # Determine which entities to load
         entities_to_load = [args.entity] if args.entity else ENTITY_ORDER

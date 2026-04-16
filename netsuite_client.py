@@ -181,6 +181,15 @@ class NetSuiteClient:
         resp = self._request("POST", url, payload)
         return resp
 
+    def patch_record(
+        self, record_type: str, external_id: str, payload: dict
+    ) -> requests.Response:
+        """PATCH an existing record by externalId. Partial update — only provided fields are changed."""  # noqa: E501
+        url = f"{self.base_url}/{record_type}/eid:{urllib.parse.quote(external_id, safe='')}"
+        time.sleep(config.REQUEST_DELAY_SECONDS)
+        resp = self._request("PATCH", url, payload)
+        return resp
+
     def get_record(self, record_type: str, internal_id: str) -> Optional[dict]:
         """GET a record by internal ID."""
         url = f"{self.base_url}/{record_type}/{internal_id}"
@@ -224,7 +233,9 @@ class NetSuiteClient:
             )
 
             if resp.status_code != 200:
-                logger.warning(f"SuiteQL query failed ({resp.status_code}): {resp.text[:500]}")
+                logger.warning(
+                    f"SuiteQL query failed ({resp.status_code}): {resp.text[:500]}"
+                )
                 break
 
             data = resp.json()
@@ -346,10 +357,16 @@ class NetSuiteClient:
                 if ns_id:
                     return ("success", ns_id, None)
                 if tier3_field and tier3_value:
-                    ns_id = self.retrieve_id_by_suiteql(record_type, tier3_field, tier3_value)
+                    ns_id = self.retrieve_id_by_suiteql(
+                        record_type, tier3_field, tier3_value
+                    )
                     if ns_id:
                         return ("success", ns_id, None)
-                return ("success_no_id", None, "Record exists in NS but ID could not be resolved")
+                return (
+                    "success_no_id",
+                    None,
+                    "Record exists in NS but ID could not be resolved",
+                )
 
             error_msg = f"HTTP {resp.status_code}: {resp.text[:1000]}"
             logger.error(f"Create {record_type} failed: {error_msg}")
