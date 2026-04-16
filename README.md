@@ -86,6 +86,7 @@ Step 4 — Review results
 | `--report`           | —                                                   | Print the load state summary (counts per status per entity). No loading. Also prints field mapping. |
 | `--failures`         | —                                                   | Add failure details (error message, timestamp) to `--report` output. Must be used with `--report`.  |
 | `--field-map`        | —                                                   | Print the CSV column → NetSuite API field mapping table for all loaders. No credentials needed.     |
+| `--patch`            | —                                                   | PATCH existing customer records with custom fields. Use with `--entity customer`.                    |
 
 ### Re-runs
 
@@ -151,7 +152,8 @@ See [TODO.md](TODO.md) for the full prioritised task list (P0 → P1 → P2).
 - 19 customers loaded without default address flags: NS silently accepted the customer records but dropped `defaultBilling`/`defaultShipping`. These were identified via address map misses and repaired directly in NS. All 19 billing accounts subsequently loaded.
 - Subscription loader: groups 70 CSV rows into 49 unique subscriptions with nested lines; resolves customer + billing account references
 - One-off loader: 26 records, resolves customer by name
-- CLI orchestrator: `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`
+- Customer custom fields: **9 fields patched across all 68 customers** on 2026-04-15 via `--patch`. Fields set: `cseg_busclass` (Managed Services), `cseg_segment` (Moorepay), `custentity_3805_dunning_procedure` (ID 6), `custentity_3805_dunning_letters_toemail`, `emailpreference` (PDF), `custentity_alf_company_reg_num`, `custentityindexationdatecustomer`, `custentity_zellis_po_mandatory`, `custentity_2663_direct_debit`. Deferred: `custentity_3805_dunning_level` (NS ID unknown), `custentity_zellis_elec_email_recipients` (Phase 2), Dunning Contact names (awaiting client).
+- CLI orchestrator: `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`, `--patch`
 - Idempotent state tracking via SQLite (`state/load_state.db`)
 - Structured logging: `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal
 - 3-tier ID resolution (Location header → GET by externalId → SuiteQL fallback)
