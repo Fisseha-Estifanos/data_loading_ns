@@ -161,7 +161,7 @@ See **[TODO.md](TODO.md)** for the full prioritised task list (P0 → P1 → P2)
 | Dunning Contact First Name | `custentity_???` | ❌ Awaiting client: label lookup needed for custentity6/9/15_2/19/376 |
 | Dunning Contact Last Name | `custentity_???` | ❌ Awaiting client: label lookup needed |
 | Dunning Level (Req) | `custentity_3805_dunning_level` | ❌ Script ID known — NS value ID for "Level 1 and Above" unresolvable via SuiteQL/REST; NS UI lookup needed |
-| Electronic Email Recipients | `custentity_zellis_elec_email_recipients` | ❌ Phase 2 — linked record (`customrecord_zellis_elec_email_recipient`); requires two-step create+link |
+| Electronic Email Recipients | `custentity_zellis_elec_email_recipients` | ✅ Done — 63/68 linked (2026-04-16). Two-step: POST `customrecord_zellis_elec_email_recipient` (externalId=`{ext_id}_EER`, name=`{ext_id}_EER`, email1=CSV value) → PATCH customer. 5 blank in CSV skipped. `--patch-eer` flag added. |
 
 ### CSV Column → NetSuite Field Mappings (Billing Account)
 

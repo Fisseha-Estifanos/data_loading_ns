@@ -25,16 +25,16 @@ python main.py --report                           # 7. Check state summary + fie
 python main.py --report --failures                #    Include per-record error details
 ```
 
-| Flag               | Description                                                                              |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| `--entity`         | Load one entity type: customer, billingAccount, subscription, oneOff                     |
-| `--dry-run`        | Build payloads and log them — no API calls made                                          |
-| `--limit N`        | Process only first N records                                                             |
-| `--skip-preflight` | Skip auth connectivity check at startup                                                  |
-| `--report`         | Print load state summary. Also prints field mapping. No loading.                         |
-| `--failures`       | Add per-record error details to `--report` output                                        |
-| `--field-map`      | Print CSV column → NetSuite API field mapping for all loaders. No credentials needed     |
-| `--patch`          | PATCH existing customer records with custom fields (use with `--entity customer`)        |
+| Flag               | Description                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------ |
+| `--entity`         | Load one entity type: customer, billingAccount, subscription, oneOff                 |
+| `--dry-run`        | Build payloads and log them — no API calls made                                      |
+| `--limit N`        | Process only first N records                                                         |
+| `--skip-preflight` | Skip auth connectivity check at startup                                              |
+| `--report`         | Print load state summary. Also prints field mapping. No loading.                     |
+| `--failures`       | Add per-record error details to `--report` output                                    |
+| `--field-map`      | Print CSV column → NetSuite API field mapping for all loaders. No credentials needed |
+| `--patch`          | PATCH existing customer records with custom fields (use with `--entity customer`)    |
 
 ---
 
@@ -97,9 +97,10 @@ python main.py --report --failures                #    Include per-record error 
     - `custentityindexationdatecustomer` → from CSV `Indexation Date` (date only) ✅
     - `custentity_zellis_po_mandatory` → from CSV `PO Mandatory` ✅
     - `custentity_2663_direct_debit` → from CSV `Direct Debit` ✅
+  - 1 field patched using `--patch-eer` flag for 63/68. 5 skipped (blank in CSV).
+    - `custentity_zellis_elec_email_recipients` ✅ Done (2026-04-16): 63/68 customers linked. Two-step: POST `customrecord_zellis_elec_email_recipient` (externalId=`{ext_id}_EER`) → PATCH customer. 5 skipped (blank in CSV). Run: `python main.py --entity customer --patch-eer`
   - **Still deferred (awaiting client / Phase 2):**
     - `custentity_3805_dunning_level` — can't resolve "Level 1 and Above" ID via SuiteQL/REST; NS UI lookup needed
-    - `custentity_zellis_elec_email_recipients` — Phase 2: requires creating a `customrecord_zellis_elec_email_recipient` record then linking
     - Dunning Contact First/Last Name — awaiting client mapping for `custentity6/9/15_2/19/376`
 
 - [ ] **Resolve subscription plan internal IDs**
