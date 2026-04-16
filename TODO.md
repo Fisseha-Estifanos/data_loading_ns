@@ -17,7 +17,8 @@ Run in this order:
 python main.py --field-map                        # 1. Inspect all CSV→API field mappings (no credentials)
 python main.py --dry-run --entity customer        # 2. Validate payloads before going live
 python main.py --dry-run --limit 1                #    Test a single record
-python main.py --entity customer                  # 3. Load customers first (no dependencies)
+python main.py --entity customer                  # 3. Load customers (includes 9 custom fields automatically)
+python main.py --entity customer --patch-eer      #    Link Electronic Email Recipients (always a second step)
 python main.py --entity billingAccount            # 4. Load billing accounts (needs customers)
 python main.py --entity subscription              # 5. Load subscriptions (needs customers + billing)
 python main.py --entity oneOff                    # 6. Load one-off invoices (needs customers)
@@ -25,16 +26,17 @@ python main.py --report                           # 7. Check state summary + fie
 python main.py --report --failures                #    Include per-record error details
 ```
 
-| Flag               | Description                                                                          |
-| ------------------ | ------------------------------------------------------------------------------------ |
-| `--entity`         | Load one entity type: customer, billingAccount, subscription, oneOff                 |
-| `--dry-run`        | Build payloads and log them — no API calls made                                      |
-| `--limit N`        | Process only first N records                                                         |
-| `--skip-preflight` | Skip auth connectivity check at startup                                              |
-| `--report`         | Print load state summary. Also prints field mapping. No loading.                     |
-| `--failures`       | Add per-record error details to `--report` output                                    |
-| `--field-map`      | Print CSV column → NetSuite API field mapping for all loaders. No credentials needed |
-| `--patch`          | PATCH existing customer records with custom fields (use with `--entity customer`)    |
+| Flag | Description |
+| --- | --- |
+| `--entity` | Load one entity type: customer, billingAccount, subscription, oneOff |
+| `--dry-run` | Build payloads and log them — no API calls made |
+| `--limit N` | Process only first N records |
+| `--skip-preflight` | Skip auth connectivity check at startup |
+| `--report` | Print load state summary. Also prints field mapping. No loading. |
+| `--failures` | Add per-record error details to `--report` output |
+| `--field-map` | Print CSV column → NetSuite API field mapping for all loaders. No credentials needed |
+| `--patch` | **Retroactive only.** PATCH already-loaded customers with custom fields. Not needed for new loads — fields are in `build_payload()` now. |
+| `--patch-eer` | Link `custentity_zellis_elec_email_recipients` via two-step POST+PATCH. Always run after `--entity customer`. |
 
 ---
 

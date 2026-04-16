@@ -64,11 +64,11 @@ Step 2 — Dry run (validate payloads, no API calls)
   python main.py --dry-run --limit 1
 
 Step 3 — Load (live API calls, dependency order must be respected)
-  python main.py --entity customer
+  python main.py --entity customer                  # 9 custom fields included automatically
+  python main.py --entity customer --patch-eer      # link EER records (always a second step)
   python main.py --entity billingAccount
   python main.py --entity subscription
   python main.py --entity oneOff
-  python main.py                          # all four in order
 
 Step 4 — Review results
   python main.py --report
@@ -77,16 +77,17 @@ Step 4 — Review results
 
 ### All flags
 
-| Flag                 | Values                                              | Description                                                                                         |
-| -------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `--entity`           | `customer` `billingAccount` `subscription` `oneOff` | Load only this entity type. Omit to run all four in dependency order.                               |
-| `--dry-run`          | —                                                   | Build and log payloads without making any API calls.                                                |
-| `--limit N`          | integer                                             | Process only the first N records. Use with `--dry-run` or a live run to test a single record.       |
-| `--skip-preflight`   | —                                                   | Skip the auth connectivity check at startup.                                                        |
-| `--report`           | —                                                   | Print the load state summary (counts per status per entity). No loading. Also prints field mapping. |
-| `--failures`         | —                                                   | Add failure details (error message, timestamp) to `--report` output. Must be used with `--report`.  |
-| `--field-map`        | —                                                   | Print the CSV column → NetSuite API field mapping table for all loaders. No credentials needed.     |
-| `--patch`            | —                                                   | PATCH existing customer records with custom fields. Use with `--entity customer`.                    |
+| Flag | Values | Description |
+| --- | --- | --- |
+| `--entity` | `customer` `billingAccount` `subscription` `oneOff` | Load only this entity type. Omit to run all four in dependency order. |
+| `--dry-run` | — | Build and log payloads without making any API calls. |
+| `--limit N` | integer | Process only the first N records. Use with `--dry-run` or a live run to test a single record. |
+| `--skip-preflight` | — | Skip the auth connectivity check at startup. |
+| `--report` | — | Print the load state summary (counts per status per entity). No loading. Also prints field mapping. |
+| `--failures` | — | Add failure details (error message, timestamp) to `--report` output. Must be used with `--report`. |
+| `--field-map` | — | Print the CSV column → NetSuite API field mapping table for all loaders. No credentials needed. |
+| `--patch` | — | **Retroactive only.** PATCH already-loaded customers with custom fields. Not needed for new loads — 9 custom fields are now built into `build_payload()`. |
+| `--patch-eer` | — | Link `custentity_zellis_elec_email_recipients` via two-step POST+PATCH. Always run after `--entity customer`. |
 
 ### Re-runs
 

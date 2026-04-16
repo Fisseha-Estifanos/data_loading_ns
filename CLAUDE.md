@@ -128,8 +128,8 @@ See **[TODO.md](TODO.md)** for the full prioritised task list (P0 → P1 → P2)
 - **SuiteQL pagination**: `suiteql_query()` paginates via `?limit=1000&offset=N` until `hasMore=false`.
 - **Subscription loader**: groups 70 CSV rows into 49 subscription headers with nested lines. Resolves customer via name→extId→stateTracker chain. Resolves billing account via `{deal_id}_BA` pattern. Correctly blocks when dependencies missing.
 - **One-off loader**: 26 rows, resolves customer by name. Builds invoice payloads.
-- **Orchestrator**: CLI with `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`, `--patch`. Dependency warnings. Structured logging to `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal.
-- **Customer custom fields**: **9 fields patched across all 68 customers** (2026-04-15). `patch_record()` added to `netsuite_client.py`; `_apply_custom_fields()`, `build_patch_payload()`, `patch_all()` added to `loaders/customer.py`. Run via `python main.py --entity customer --patch`.
+- **Orchestrator**: CLI with `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`, `--patch`, `--patch-eer`. Dependency warnings. Structured logging to `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal.
+- **Customer custom fields**: **10 fields now set on all customers.** 9 standard fields (`cseg_busclass`, `cseg_segment`, `custentity_3805_dunning_procedure`, `custentity_3805_dunning_letters_toemail`, `emailpreference`, `custentity_alf_company_reg_num`, `custentityindexationdatecustomer`, `custentity_zellis_po_mandatory`, `custentity_2663_direct_debit`) are built into `build_payload()` and included automatically in every new customer POST — no extra flag needed. `custentity_zellis_elec_email_recipients` requires a separate `--patch-eer` step (two-step POST+PATCH, always run after `--entity customer`). `--patch` is retroactive-only (used once to update the 68 already-loaded customers before fields were added to `build_payload()`).
 - **Idempotency**: SQLite state + NetSuite externalId upsert semantics.
 
 ---
@@ -149,15 +149,15 @@ See **[TODO.md](TODO.md)** for the full prioritised task list (P0 → P1 → P2)
 | Terms | `terms.refName` | ⚠️ Needs ID verification |
 | Address fields | `addressBook.items[]` | ✅ Mapped with country code resolution |
 | Job Title | `title` | ✅ Mapped |
-| Direct Debit | `custentity_2663_direct_debit` | ✅ Patched — bool (Y/True→true) |
-| Allow Letters to be Emailed | `custentity_3805_dunning_letters_toemail` | ✅ Patched — bool (Y→true) |
-| PO Mandatory | `custentity_zellis_po_mandatory` | ✅ Patched — bool (True/False string) |
-| Dunning Procedure | `custentity_3805_dunning_procedure` | ✅ Patched — `{"id": "6"}` (Moorepay \| Dunning Procedure, confirmed by GET on customer/578027) |
-| Business/Class | `cseg_busclass` | ✅ Patched — `{"id": "1"}` (Managed Services, confirmed via SuiteQL) |
-| Segment | `cseg_segment` | ✅ Patched — `{"id": "2"}` (Moorepay, confirmed via SuiteQL) |
-| Company Reg Number | `custentity_alf_company_reg_num` | ✅ Patched — plain string from CSV |
-| Email Preference | `emailpreference` | ✅ Patched — plain string `"PDF"` |
-| Indexation Date | `custentityindexationdatecustomer` | ✅ Patched — date string (time component stripped from ISO datetime) |
+| Direct Debit | `custentity_2663_direct_debit` | ✅ Auto — in `build_payload()`. bool (Y/True→true) |
+| Allow Letters to be Emailed | `custentity_3805_dunning_letters_toemail` | ✅ Auto — in `build_payload()`. bool (Y→true) |
+| PO Mandatory | `custentity_zellis_po_mandatory` | ✅ Auto — in `build_payload()`. bool (True/False string) |
+| Dunning Procedure | `custentity_3805_dunning_procedure` | ✅ Auto — in `build_payload()`. `{"id": "6"}` (Moorepay \| Dunning Procedure, confirmed by GET on customer/578027) |
+| Business/Class | `cseg_busclass` | ✅ Auto — in `build_payload()`. `{"id": "1"}` (Managed Services, confirmed via SuiteQL) |
+| Segment | `cseg_segment` | ✅ Auto — in `build_payload()`. `{"id": "2"}` (Moorepay, confirmed via SuiteQL) |
+| Company Reg Number | `custentity_alf_company_reg_num` | ✅ Auto — in `build_payload()`. Plain string from CSV |
+| Email Preference | `emailpreference` | ✅ Auto — in `build_payload()`. Plain string `"PDF"` |
+| Indexation Date | `custentityindexationdatecustomer` | ✅ Auto — in `build_payload()`. Date string (time component stripped from ISO datetime) |
 | Dunning Contact First Name | `custentity_???` | ❌ Awaiting client: label lookup needed for custentity6/9/15_2/19/376 |
 | Dunning Contact Last Name | `custentity_???` | ❌ Awaiting client: label lookup needed |
 | Dunning Level (Req) | `custentity_3805_dunning_level` | ❌ Script ID known — NS value ID for "Level 1 and Above" unresolvable via SuiteQL/REST; NS UI lookup needed |
