@@ -100,7 +100,33 @@ class OneOffLoader(BaseLoader):
             return None
         description = row.get("Description", "").strip()
         tran_date = row.get("Date (Req)", "").strip()
-        item_name = row.get("Item", "").strip()
+        item_names_raw = row.get("Item", "").strip().replace("\u200b", "")
+
+        # Split comma-separated item names into individual line items.
+        # Each item in the list gets its own line with the same rate, quantity, and description.
+        if item_names_raw and item_names_raw != "NOT MAPPED":
+            item_names = [p.strip() for p in item_names_raw.split(",") if p.strip()]
+        else:
+            item_names = []
+
+        line_items = []
+        for name in item_names:
+            line = {
+                "item": {"refName": name},
+                "quantity": float(quantity),
+                "rate": float(rate) if rate else None,
+                "description": description,
+            }
+            line_items.append({k: v for k, v in line.items() if v is not None})
+
+        # If no items resolved, send a line without an item reference (description-only)
+        if not line_items:
+            line = {
+                "quantity": float(quantity),
+                "rate": float(rate) if rate else None,
+                "description": description,
+            }
+            line_items.append({k: v for k, v in line.items() if v is not None})
 
         payload = {
             "externalId": ext_id,
@@ -108,20 +134,7 @@ class OneOffLoader(BaseLoader):
             "subsidiary": {"id": subsidiary_id},
             "currency": {"id": currency_id},
             "tranDate": tran_date,
-            "item": {
-                "items": [
-                    {
-                        "item": (
-                            {"refName": item_name}
-                            if item_name and item_name != "NOT MAPPED"
-                            else None
-                        ),
-                        "quantity": float(quantity),
-                        "rate": rate,
-                        "description": description,
-                    }
-                ]
-            },
+            "item": {"items": line_items},
         }
 
         # Revenue recognition dates — likely custom columns on the line
@@ -133,12 +146,6 @@ class OneOffLoader(BaseLoader):
         if rev_end:
             # TODO: Map to custcol_xxx on the line item
             pass
-
-        # Clean None from line items
-        payload["item"]["items"] = [
-            {k: v for k, v in line.items() if v is not None}
-            for line in payload["item"]["items"]
-        ]
 
         payload = {k: v for k, v in payload.items() if v is not None}
         return payload

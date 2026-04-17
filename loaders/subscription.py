@@ -6,9 +6,18 @@ Maps subscriptionskleeneexport CSV → NetSuite Subscription records.
 Key design:
   - CSV rows are grouped by External ID (deal ID) → one subscription per group
   - Header fields are taken from the first row in each group
-  - Each row becomes a subscription line item
+  - Each row produces a list of item names to include (split from comma-separated Sales Item cells)
   - Customer is resolved by company name → customer CSV External ID 2 → state tracker
   - Billing account is resolved by {deal_id}_BA → state tracker (if available)
+
+Two-step subscription creation:
+  Step 1 — POST subscription header (subscriptionPlan but NO subscriptionLine items).
+            NS auto-creates all plan lines from the plan, all with isIncluded=False.
+  Step 2 — GET the created subscription's lines. For each item in the CSV that has
+            Lines: Include = T, find its line number and PATCH it to isIncluded=True.
+
+This is required because NS rejects manual subscriptionLine items without explicit prices.
+When a plan is set, NS owns line creation; we only control which lines are included.
 
 Dependencies: Customer and Billing Account must be loaded first.
 """
@@ -35,6 +44,15 @@ CURRENCY_MAP = {
     "EUR": "4",
 }
 
+# Subscription term name (from CSV) → NS internal ID
+# Confirmed via SuiteQL: SELECT id, name FROM subscriptionterm
+# CSV "Custom Term" → NS id -102 ("Custom Term")
+# CSV "Evergreen"   → NS id -101 ("Evergreen Term")
+TERM_MAP = {
+    "Custom Term": "-102",
+    "Evergreen": "-101",
+}
+
 
 class SubscriptionLoader(BaseLoader):
     """Subscription Loader"""
@@ -47,6 +65,9 @@ class SubscriptionLoader(BaseLoader):
         super().__init__(client, tracker)
         # Pre-load customer name → external ID mapping from customer CSV
         self._customer_name_to_ext_id = self._build_customer_name_map()
+        # Keyed by ext_id → list of item names from CSV with Lines: Include = T
+        # Populated during prepare_records(); consumed during load_all() step 2.
+        self._pending_lines: dict[str, list[str]] = {}
 
     def _build_customer_name_map(self) -> dict:
         """Read customer CSV to build company name → External ID 2 lookup."""
@@ -99,8 +120,31 @@ class SubscriptionLoader(BaseLoader):
         """Not used directly — see _build_grouped_payload."""
         raise NotImplementedError("Use prepare_records for grouped logic")
 
+    def _extract_item_names(self, row: dict) -> list[str]:
+        """
+        Extract individual item names from a CSV row's Sales Item cell.
+        Splits comma-separated values and strips zero-width spaces (U+200B artefacts).
+        Only returns names from rows where Lines: Include = T.
+        """
+        include = row.get("Lines: Include", "").strip()
+        if include != "T":
+            return []
+        sales_item_raw = row.get("Sales Item", "").strip()
+        if not sales_item_raw or sales_item_raw == "NOT MAPPED":
+            return []
+        names = []
+        for part in sales_item_raw.split(","):
+            name = part.strip().replace("\u200b", "")
+            if name:
+                names.append(name)
+        return names
+
     def _build_grouped_payload(self, ext_id: str, rows: list[dict]) -> Optional[dict]:
-        """Build a subscription payload from a group of CSV rows (1 header + N lines)."""
+        """
+        Build a subscription POST payload from a group of CSV rows.
+        Does NOT include subscriptionLine — NS auto-creates lines from the plan.
+        Items to activate are stored in self._pending_lines[ext_id] for step 2.
+        """
         header = rows[0]  # Header fields are identical across rows in the group
 
         customer_name = header.get("Customer", "").strip()
@@ -156,7 +200,7 @@ class SubscriptionLoader(BaseLoader):
             "subsidiary": {"id": subsidiary_id},
             "currency": {"id": currency_id},
             "startDate": header.get("Start Date", "").strip(),
-            "initialTerm": header.get("Initial Term", "").strip() or None,
+            "initialTerm": None,  # resolved below via TERM_MAP
         }
 
         # End date
@@ -168,65 +212,190 @@ class SubscriptionLoader(BaseLoader):
         if billing_account_ns_id:
             payload["billingAccount"] = {"id": billing_account_ns_id}
 
-        # Subscription plan — needs NS internal ID
-        # TODO: Resolve subscription plan name → NS internal ID
-        #   Run SuiteQL: SELECT id, name FROM subscriptionplan
-        #   Map: "HR Services rolling (LPG)" → id
+        # Initial Term — resolve via TERM_MAP (plain string rejected by NS)
+        initial_term_raw = header.get("Initial Term", "").strip()
+        if initial_term_raw:
+            term_id = TERM_MAP.get(initial_term_raw)
+            if term_id:
+                payload["initialTerm"] = {"id": term_id}
+            else:
+                logger.error(
+                    f"Subscription {ext_id}: unmapped Initial Term '{initial_term_raw}' — "
+                    f"add to TERM_MAP in loaders/subscription.py"
+                )
+                return None
+
+        # Default Renewal Term — required by NS, resolve via TERM_MAP
+        renewal_term_raw = header.get("Default Renewal Term", "").strip()
+        if renewal_term_raw:
+            term_id = TERM_MAP.get(renewal_term_raw)
+            if term_id:
+                payload["defaultRenewalTerm"] = {"id": term_id}
+            else:
+                logger.error(
+                    f"Subscription {ext_id}: unmapped Default Renewal Term '{renewal_term_raw}' — "
+                    f"add to TERM_MAP in loaders/subscription.py"
+                )
+                return None
+
+        # Default Renewal Subscription Plan
+        renewal_plan = header.get("Default Renewal Subscription Plan", "").strip()
+        if renewal_plan:
+            payload["defaultRenewalSubscriptionPlan"] = {"refName": renewal_plan}
+
+        # Subscription plan — NS uses this to auto-create subscription lines
         sub_plan = header.get("Subscription Plan", "").strip()
         if sub_plan:
             payload["subscriptionPlan"] = {"refName": sub_plan}
-            # ↑ refName may work; if not, replace with {"id": "..."}
 
         # Price book
         price_book = header.get("Price Book", "").strip()
         if price_book and price_book != "NOT MAPPED":
             payload["priceBook"] = {"refName": price_book}
 
-        # CPI Type — likely custom field
-        # TODO: payload["custrecord_cpi_type"] = header.get("CPI Type", "").strip()
-
-        # Default Renewal Term — likely custom field
-        # TODO: payload["custrecord_renewal_term"] = header.get("Default Renewal Term", "").strip()
-
-        # Indexation Date — likely custom field
-        # TODO: payload["custrecord_indexation_date"] = header.get("Indexation Date", "").strip()
-
         # PO#
         po = header.get("PO#", "").strip()
         if po:
-            # TODO: verify field name — might be custbody_po or a standard field
             payload["poNumber"] = po
 
-        # ── Line items ──────────────────────────────────────────────────
-        lines = []
-        for row in rows:
-            line = self._build_line(row)
-            if line:
-                lines.append(line)
+        # CPI Type — likely custom field, skip for now
+        # TODO: payload["custrecord_cpi_type"] = header.get("CPI Type", "").strip()
 
-        if lines:
-            payload["subscriptionLine"] = {"items": lines}
+        # Indexation Date — likely custom field, skip for now
+        # TODO: payload["custrecord_indexation_date"] = header.get("Indexation Date", "").strip()
+
+        # ── Collect items to activate (step 2 — not in POST payload) ────
+        items_to_include = []
+        for row in rows:
+            for name in self._extract_item_names(row):
+                if name not in items_to_include:
+                    items_to_include.append(name)
+        self._pending_lines[ext_id] = items_to_include
 
         # Clean None values
         payload = {k: v for k, v in payload.items() if v is not None}
-        logger.info(f"Subscription Payload: {payload}")
+        logger.info(
+            f"Subscription Payload: {payload} | lines_to_activate={items_to_include}"
+        )
         return payload
 
-    def _build_line(self, row: dict) -> Optional[dict]:
-        """Build a single subscription line item from a CSV row."""
-        sales_item = row.get("Sales Item", "").strip()
-        include = row.get("Lines: Include", "").strip()
+    # ── Override load_all for two-step creation ──────────────────────────
 
-        if not sales_item or sales_item == "NOT MAPPED":
-            return None
+    def load_all(self, limit: int = None) -> dict:
+        """
+        Two-step subscription creation:
+          Step 1 — POST subscription header → NS creates all plan lines (isIncluded=False)
+          Step 2 — GET lines, PATCH CSV-specified items to isIncluded=True
+        """
+        records = self.prepare_records()
+        if limit is not None:
+            records = records[:limit]
+            logger.info(f"--limit {limit}: processing {len(records)} record(s)")
+        run_id = self.tracker.start_run(self.ENTITY_TYPE)
 
-        line = {
-            "subscriptionLineType": "1",  # Standard line type
-            "include": include == "T",
-            # Sales item — needs NS internal ID
-            # TODO: Resolve sales item name → NS internal ID
-            #   Run SuiteQL: SELECT id, itemid FROM item WHERE itemid = '...'
-            "item": {"refName": sales_item},
+        total = len(records)
+        success = 0
+        failed = 0
+        skipped = 0
+
+        logger.info(f"=== Loading {self.ENTITY_TYPE}: {total} records ===")
+
+        for i, (ext_id, payload, row) in enumerate(records, 1):
+            if self.tracker.is_already_loaded(self.ENTITY_TYPE, ext_id):
+                logger.info(f"[{i}/{total}] SKIP {ext_id} (already loaded)")
+                skipped += 1
+                continue
+
+            logger.info(f"[{i}/{total}] Creating {self.ENTITY_TYPE}: {ext_id}")
+
+            # Step 1: POST subscription header
+            status, ns_id, error = self.client.create_and_resolve_id(
+                record_type=self.RECORD_TYPE,
+                payload=payload,
+                external_id=ext_id,
+                tier3_field=self.get_tier3_field(),
+                tier3_value=self.get_tier3_value(row) if row else None,
+            )
+
+            # Step 2: activate subscription lines (only if step 1 succeeded with a resolved ID)
+            if status == "success" and ns_id:
+                items = self._pending_lines.get(ext_id, [])
+                if items:
+                    self._activate_subscription_lines(ext_id, ns_id, items)
+                else:
+                    logger.info(f"  No lines to activate for {ext_id}")
+
+            self.tracker.upsert_state(
+                entity_type=self.ENTITY_TYPE,
+                external_id=ext_id,
+                status=status,
+                netsuite_id=ns_id,
+                error_message=error,
+                payload_hash=self.hash_payload(payload),
+                tier_used=None,
+            )
+
+            if status in ("success", "success_no_id"):
+                success += 1
+                if status == "success_no_id":
+                    logger.warning(f"  ⚠ Record created but ID not resolved: {ext_id}")
+            else:
+                failed += 1
+                logger.error(f"  ✗ Failed: {error}")
+
+        self.tracker.finish_run(run_id, total, success, failed, skipped)
+        summary = {"total": total, "success": success, "failed": failed, "skipped": skipped}
+        logger.info(f"=== {self.ENTITY_TYPE} complete: {summary} ===")
+        return summary
+
+    def _activate_subscription_lines(
+        self, ext_id: str, ns_id: str, items_to_include: list[str]
+    ) -> None:
+        """
+        GET all auto-created lines for a subscription, then PATCH the ones in
+        items_to_include to isIncluded=True.
+        Logs a warning for any item not found in the plan's auto-created lines.
+        """
+        url = f"{config.BASE_URL}/subscription/{ns_id}?expandSubResources=true"
+        resp = self.client._request("GET", url)
+        if resp.status_code != 200:
+            logger.error(
+                f"  Cannot GET subscription {ns_id} to activate lines: HTTP {resp.status_code}"
+            )
+            return
+
+        lines = resp.json().get("subscriptionLine", {}).get("items", [])
+        if not lines:
+            logger.warning(f"  Subscription {ns_id}: no auto-created lines found from plan")
+            return
+
+        # Build item refName → lineNumber map
+        item_to_line_num: dict[str, int] = {
+            line.get("item", {}).get("refName", ""): line.get("lineNumber")
+            for line in lines
         }
 
-        return line
+        logger.info(
+            f"  Activating {len(items_to_include)} line(s) for {ext_id} "
+            f"(sub {ns_id}, plan has {len(lines)} total lines)"
+        )
+
+        for item_name in items_to_include:
+            line_num = item_to_line_num.get(item_name)
+            if line_num is None:
+                logger.warning(
+                    f"  ⚠ '{item_name}' not found in plan lines for sub {ns_id}. "
+                    f"Available: {list(item_to_line_num.keys())}"
+                )
+                continue
+            line_url = (
+                f"{config.BASE_URL}/subscription/{ns_id}/subscriptionLine/{line_num}"
+            )
+            patch_resp = self.client._request("PATCH", line_url, {"isIncluded": True})
+            if patch_resp.status_code == 204:
+                logger.info(f"  ✓ Line {line_num} ({item_name}) → isIncluded=True")
+            else:
+                logger.error(
+                    f"  ✗ Failed to activate line {line_num} ({item_name}): "
+                    f"HTTP {patch_resp.status_code}: {patch_resp.text[:300]}"
+                )

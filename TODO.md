@@ -131,13 +131,17 @@ python main.py --report --failures                #    Include per-record error 
   - 5 name > 50 chars resolved and loaded; 1 customer-blocked record unblocked and loaded
   - Note: NS `name` field has a 50-char hard limit — final billing account name format TBD pending Moorepay/Tech discussion (Adam)
 
-- [ ] **Load 49 subscriptions**
+- [~] **Load 49 subscriptions — 42/49 done**
   - `python main.py --entity subscription`
-  - Verify: `python main.py --report --failures`
+  - 7 failing records (require client/MoorePay input before retrying):
+    - **4 no-plan** (`396048163025`, `412482838771`, `412352092390`, `442541777135`): CSV has no Subscription Plan — NS rejects "no lines". Client must specify correct plan for NextGen ROI/Data Read Only subscriptions.
+    - **1 no-price-book** (`437881274561` MV991, Moorepay NextGen M): `Price Book = NOT MAPPED` in CSV. Client must specify correct price book.
+    - **2 date-mismatch** (`478126306525` MFL50 start 01/04/2026, `385056850123` M28T0 start 01/02/2026): subscription start date < billing account start date. Options: PATCH billing account `startDate` in NS, omit billing account ref for these two, or get client to confirm correct dates.
 
-- [ ] **Load 26 one-off invoices**
+- [~] **Load 26 one-off invoices — 18/26 done**
   - `python main.py --entity oneOff`
-  - Verify: `python main.py --report --failures`
+  - 8 failing records — all have items where NS `revenueRecognitionRule = "Rev Rec on Billing"` (items are tied to subscription billing engine; NS rejects them on manual invoices with "Invalid Field Value"). Affects: "Next Gen ROI (M) - Back Billing - Moorepayhr Managed", "Next Gen (M) - Contract Enforce - Managed payroll", "Next Gen ROI (M) - Contract Enforce - Managed payroll", "Next Gen (M/S) - Contract Enforce - Auto Enrolment", "Technical Delivery Tier 1" variants.
+  - **Client action required:** MoorePay NS admin needs to either allow these items on manual invoices, or advise which generic substitute item to use.
 
 ---
 
