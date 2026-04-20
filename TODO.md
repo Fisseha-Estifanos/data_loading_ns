@@ -131,12 +131,17 @@ python main.py --report --failures                #    Include per-record error 
   - 5 name > 50 chars resolved and loaded; 1 customer-blocked record unblocked and loaded
   - Note: NS `name` field has a 50-char hard limit — final billing account name format TBD pending Moorepay/Tech discussion (Adam)
 
-- [~] **Load 49 subscriptions — 43/49 done**
+- [~] **Load 52 subscriptions — 48/52 done**
+  - CSV updated twice (A1 fix applied to 2 records across 2 rounds; 3 new ROI subscriptions added). Current file: `subscriptions-kleene-export-2026-04-20-A1-fix-applied-2-records.csv`
   - `python main.py --entity subscription`
-  - 6 failing records (require client/MoorePay input before retrying):
-    - **4 no-plan** (`396048163025`, `412482838771`, `412352092390`, `442541777135`): CSV has no Subscription Plan — NS rejects "no lines". Client must specify correct plan for NextGen ROI/Data Read Only subscriptions.
-    - **1 no-price-book** (`437881274561` MV991, Moorepay NextGen M): `Price Book = NOT MAPPED` in CSV. Client must specify correct price book.
-    - **1 date-mismatch** (`478126306525` VALE MILL, start 01/04/2026): subscription start date < billing account start date 15/04/2026. `385056850123` (BLACKMOOR) was unblocked and loaded ✅ after billing CSV A3 fix. For `478126306525`: REST API PATCH of BA startDate returned HTTP 204 but NS silently ignored the change — NS has a business rule preventing startDate from being moved earlier via API. **NS admin must change billing account `478126306525_BA` (NS ID 25659) startDate from 15/04/2026 to 01/04/2026 directly in the NS UI.** Then reset this record to pending and re-run.
+  - **A1 progress:** 2 of 4 no-plan records now loaded:
+    - `412352092390` (Catapult Limited) ✅ — plan `Moorepay NextGen ROI (M)` added to CSV
+    - `412482838771` (JONAS COMPUTING (UK) Ltd) ✅ — plan added + customer name corrected in CSV (was `JONAS COMPUTING (UK) LIMITED`, must match customer CSV exactly as `JONAS COMPUTING (UK) Ltd`)
+  - **3 new ROI subscriptions** added in updated CSV — all loaded ✅ (`403976762616`, `436403436738`, `420370874558`)
+  - 4 failing records still blocked:
+    - **A1 — 2 no-plan** (`396048163025` Uniqlo, `442541777135` TRUSTWISE): still no Subscription Plan in CSV — NS rejects "no lines". Awaiting client.
+    - **A2 — 1 no-price-book** (`437881274561` MV991 POWERTICA, Moorepay NextGen M): `Price Book = NOT MAPPED`. Awaiting client.
+    - **A3 — 1 date-mismatch** (`478126306525` VALE MILL, start 01/04/2026): billing account start date 15/04/2026 in NS. REST API PATCH silently ignored — NS prevents moving BA startDate earlier via API. **NS admin must change billing account `478126306525_BA` (NS ID 25659) startDate to 01/04/2026 in the NS UI.** Then reset to pending and re-run.
 
 - [~] **Load 26 one-off invoices — 18/26 done**
   - `python main.py --entity oneOff`
