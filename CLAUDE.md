@@ -40,11 +40,11 @@ netsuite_loader/
 │   ├── billing_account.py # CSV → NetSuite billingAccount payload (refs customer)
 │   ├── subscription.py    # CSV → NetSuite subscription payload (refs customer + billing acct)
 │   └── one_off.py         # CSV → NetSuite invoice payload (refs customer)
-├── data/                  # CSV files from Snowflake exports
-│   ├── customerskleeneexport20260409.csv      (68 rows)
-│   ├── billingkleeneexport20260409.csv        (67 rows — regenerated, DDL filter fixed)
-│   ├── subscriptionskleeneexport20260409.csv  (70 rows → 49 unique subscriptions)
-│   └── oneoffkleeneexport20260409.csv         (26 rows)
+├── data/                  # CSV files from Snowflake exports (active files per config.py)
+│   ├── customers-kleene-export-2026-04-09.csv                              (68 rows)
+│   ├── billing-kleene-export-2026-04-17-A3-fix-applied.csv                 (67 rows — regenerated, DDL filter fixed)
+│   ├── subscriptions-kleene-export-2026-04-20-A1-fix-applied-2-records.csv (→ 52 unique subscriptions)
+│   └── one-off-kleene-export-2026-04-20-A1-fix-applied-2-records.csv       (26 rows)
 ├── state/                 # SQLite DB (auto-created at runtime)
 ├── logs/                  # Timestamped log files (auto-created)
 ├── requirements.txt       # Only: requests>=2.31.0
@@ -126,7 +126,7 @@ See **[TODO.md](TODO.md)** for the full prioritised task list (P0 → P1 → P2)
 - **Customer loader**: **68/68 loaded into NS**. `MP_HubSpot_6632970696` (SAFETY-KLEEN) initially failed — phone `'0203 814 8700 - HO  0203 814 8720 - DDI'` exceeded NS 32-char limit. Client (Adam) authorised removing phone entirely; CSV fixed and reloaded. All 68 success.
 - **Billing account loader**: **68/68 loaded into NS**. Billing CSV regenerated from 100 → 67 rows (DDL filter fix). `billAddressList`/`shipAddressList` resolved at init via SuiteQL on `customeraddressbook` (30,355 rows, 31 pages). Address IDs are `internalid` from `customeraddressbook`, sent as plain strings — confirmed by inspecting existing billingAccount records via GET. 5 records that had `name` > 50 chars (NS hard limit) and 1 that was blocked by the missing customer are all now loaded. Note: final billing account name format TBD pending Moorepay/Tech discussion (Adam).
 - **SuiteQL pagination**: `suiteql_query()` paginates via `?limit=1000&offset=N` until `hasMore=false`.
-- **Subscription loader**: groups 70 CSV rows into 49 subscription headers with nested lines. Resolves customer via name→extId→stateTracker chain. Resolves billing account via `{deal_id}_BA` pattern. Correctly blocks when dependencies missing.
+- **Subscription loader**: **49/52 loaded into NS**. Groups CSV rows into 52 subscription headers with nested lines. Resolves customer via name→extId→stateTracker chain. Resolves billing account via `{deal_id}_BA` pattern. Correctly blocks when dependencies missing. `subscriptionPlan` and `priceBook` resolved via `next()` scan across all rows in a group — fixes multi-row groups where the plan-defining row is not `rows[0]` (e.g. Uniqlo 396048163025 with 6 rows, plan only on row 5). 3 records still blocked: `442541777135` (TRUSTWISE, no plan in source CSV — data issue), `437881274561` (POWERTICA MV991, NS rejects "First interval of an item cannot be deleted" — NS admin needed), `478126306525` (VALE MILL, BA start date mismatch — NS UI fix needed).
 - **One-off loader**: 26 rows, resolves customer by name. Builds invoice payloads.
 - **Orchestrator**: CLI with `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`, `--patch`, `--patch-eer`. Dependency warnings. Structured logging to `logs/YYYY-MM-DD/load_HH-MM-SS.log` (GMT+3), full tracebacks captured to file and terminal.
 - **Customer custom fields**: **10 fields now set on all customers.** 9 standard fields (`cseg_busclass`, `cseg_segment`, `custentity_3805_dunning_procedure`, `custentity_3805_dunning_letters_toemail`, `emailpreference`, `custentity_alf_company_reg_num`, `custentityindexationdatecustomer`, `custentity_zellis_po_mandatory`, `custentity_2663_direct_debit`) are built into `build_payload()` and included automatically in every new customer POST — no extra flag needed. `custentity_zellis_elec_email_recipients` requires a separate `--patch-eer` step (two-step POST+PATCH, always run after `--entity customer`). `--patch` is retroactive-only (used once to update the 68 already-loaded customers before fields were added to `build_payload()`).
@@ -183,12 +183,13 @@ See **[TODO.md](TODO.md)** for the full prioritised task list (P0 → P1 → P2)
 
 ### Subscription Grouping Logic
 
-- CSV has 70 rows → 49 unique subscriptions (grouped by `External ID` = deal ID)
-- Multi-line subscriptions: 16 groups with 2-6 lines each
-- Header fields (same across rows in a group): Subscription Name, Customer, Start Date, End Date, Subscription Plan, Subsidiary, Currency, etc.
+- Current CSV (`subscriptions-kleene-export-2026-04-20-A1-fix-applied-2-records.csv`): 52 unique subscription groups (grouped by `External ID` = deal ID)
+- Multi-line subscriptions: 16 groups with 2-6 lines each; Uniqlo (396048163025) has 6 rows across multiple plan types
+- Header fields (same across rows in a group): Subscription Name, Customer, Start Date, End Date, Subsidiary, Currency, etc.
+- **`Subscription Plan` and `Price Book` are NOT guaranteed to be on `rows[0]`** — they appear only on the plan-defining row. Loader uses `next()` scan across all group rows to find the first non-empty value.
 - Line fields (differ per row): Sales Item, Lines: Include
 - Customer resolution chain: `Customer` (name) → customer CSV `Company Name` → `External ID 2` → state tracker → NS internal ID
-- Billing account resolution: `{External ID}_BA` → state tracker → NS internal ID (only works for 14 of 49; rest created without billing account ref)
+- Billing account resolution: `{External ID}_BA` → state tracker → NS internal ID (only works for 14 of 52; rest created without billing account ref)
 
 ---
 

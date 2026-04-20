@@ -131,16 +131,17 @@ python main.py --report --failures                #    Include per-record error 
   - 5 name > 50 chars resolved and loaded; 1 customer-blocked record unblocked and loaded
   - Note: NS `name` field has a 50-char hard limit — final billing account name format TBD pending Moorepay/Tech discussion (Adam)
 
-- [~] **Load 52 subscriptions — 48/52 done**
+- [~] **Load 52 subscriptions — 49/52 done**
   - CSV updated twice (A1 fix applied to 2 records across 2 rounds; 3 new ROI subscriptions added). Current file: `subscriptions-kleene-export-2026-04-20-A1-fix-applied-2-records.csv`
   - `python main.py --entity subscription`
-  - **A1 progress:** 2 of 4 no-plan records now loaded:
+  - **A1 progress:** 3 of 4 no-plan records now loaded:
     - `412352092390` (Catapult Limited) ✅ — plan `Moorepay NextGen ROI (M)` added to CSV
     - `412482838771` (JONAS COMPUTING (UK) Ltd) ✅ — plan added + customer name corrected in CSV (was `JONAS COMPUTING (UK) LIMITED`, must match customer CSV exactly as `JONAS COMPUTING (UK) Ltd`)
+    - `396048163025` (Uniqlo Europe Limited) ✅ — NS ID 58971, loaded 2026-04-20. Fix: subscriptionPlan was read from `rows[0]` which was a component row (empty plan); patched to `next()` scan across all group rows to find first non-empty value. Plan `Moorepay NextGen (M)`, price book `4 weekly GBP`, 26 lines activated.
   - **3 new ROI subscriptions** added in updated CSV — all loaded ✅ (`403976762616`, `436403436738`, `420370874558`)
-  - 4 failing records still blocked:
-    - **A1 — 2 no-plan** (`396048163025` Uniqlo, `442541777135` TRUSTWISE): still no Subscription Plan in CSV — NS rejects "no lines". Awaiting client.
-    - **A2 — 1 no-price-book** (`437881274561` MV991 POWERTICA, Moorepay NextGen M): `Price Book = NOT MAPPED`. Awaiting client.
+  - 3 failing records still blocked:
+    - **A1 — 1 no-plan** (`442541777135` TRUSTWISE): no Subscription Plan anywhere in CSV (1-row group, plan missing from source data) — NS rejects "no lines". Awaiting client.
+    - **A2 — 1 NS business rule error** (`437881274561` MV991 POWERTICA, Moorepay NextGen M): subscriptionPlan and lines now resolve correctly but NS rejects with "First interval of an item cannot be deleted". NS admin action or client investigation needed.
     - **A3 — 1 date-mismatch** (`478126306525` VALE MILL, start 01/04/2026): billing account start date 15/04/2026 in NS. REST API PATCH silently ignored — NS prevents moving BA startDate earlier via API. **NS admin must change billing account `478126306525_BA` (NS ID 25659) startDate to 01/04/2026 in the NS UI.** Then reset to pending and re-run.
 
 - [~] **Load 26 one-off invoices — 18/26 done**

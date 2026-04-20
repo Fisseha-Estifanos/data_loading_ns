@@ -41,12 +41,12 @@ Or edit `config.py` directly.
 
 ### Data Files
 
-Place CSVs in `data/`:
+Place CSVs in `data/` (current active files as configured in `config.py`):
 
-- `customerskleeneexport20260409.csv`
-- `billingkleeneexport20260409.csv`
-- `subscriptionskleeneexport20260409.csv`
-- `oneoffkleeneexport20260409.csv`
+- `customers-kleene-export-2026-04-09.csv`
+- `billing-kleene-export-2026-04-17-A3-fix-applied.csv`
+- `subscriptions-kleene-export-2026-04-20-A1-fix-applied-2-records.csv`
+- `one-off-kleene-export-2026-04-20-A1-fix-applied-2-records.csv`
 
 ---
 
@@ -151,7 +151,7 @@ See [TODO.md](TODO.md) for the full prioritised task list (P0 → P1 → P2).
 - `billAddressList` / `shipAddressList` resolution: NS requires both on every billing account POST. Added `_load_address_maps()` to `BillingAccountLoader.__init__` — queries `customeraddressbook` once at startup via SuiteQL and builds a `customer_ns_id → addressbook_internalid` map. Key finding: the field expects a **plain string** (the `internalid` from `customeraddressbook`), not a nested `{"id": "..."}` object. Confirmed by GET-ing an existing billingAccount in NS.
 - SuiteQL pagination: `suiteql_query()` now paginates via `?limit=1000&offset=N` until `hasMore=false` (30,355 address rows across 31 pages).
 - 19 customers loaded without default address flags: NS silently accepted the customer records but dropped `defaultBilling`/`defaultShipping`. These were identified via address map misses and repaired directly in NS. All 19 billing accounts subsequently loaded.
-- Subscription loader: **48/52 loaded**. Two-step creation (POST header → PATCH lines to isIncluded=True). CSV updated twice with A1 fixes and 3 new ROI subscriptions. 4 records still blocked awaiting client/NS admin action (2 no-plan, 1 no-price-book, 1 BA date mismatch requiring NS UI fix). `--patch-ba-startdate` flag added to correct billing account startDates from CSV.
+- Subscription loader: **49/52 loaded**. Two-step creation (POST header → PATCH lines to isIncluded=True). CSV updated twice with A1 fixes and 3 new ROI subscriptions. subscriptionPlan now resolved via `next()` scan across all group rows (fixes multi-row groups where plan row is not first). 3 records still blocked: `442541777135` (TRUSTWISE — no plan in CSV, data issue), `437881274561` (POWERTICA MV991 — NS rejects with "First interval of an item cannot be deleted", NS admin action needed), `478126306525` (VALE MILL — BA start date before subscription start date, NS UI fix needed). `--patch-ba-startdate` flag added to correct billing account startDates from CSV.
 - One-off loader: **18/26 loaded**. 8 records blocked — items have `revenueRecognitionRule = "Rev Rec on Billing"` which prevents them from being used on manually-created invoices; requires NS admin or substitute item from client.
 - Customer custom fields: **10 fields patched across all 68 customers** (9 via `--patch`, 1 via `--patch-eer`) on 2026-04-15 via `--patch`. Fields set: `cseg_busclass` (Managed Services), `cseg_segment` (Moorepay), `custentity_3805_dunning_procedure` (ID 6), `custentity_3805_dunning_letters_toemail`, `emailpreference` (PDF), `custentity_alf_company_reg_num`, `custentityindexationdatecustomer`, `custentity_zellis_po_mandatory`, `custentity_2663_direct_debit`. Deferred: `custentity_3805_dunning_level` (NS ID unknown), `custentity_zellis_elec_email_recipients` (Phase 2), Dunning Contact names (awaiting client).
 - CLI orchestrator: `--entity`, `--dry-run`, `--limit`, `--report`, `--failures`, `--skip-preflight`, `--field-map`, `--patch`

@@ -5,7 +5,10 @@ Maps subscriptionskleeneexport CSV → NetSuite Subscription records.
 
 Key design:
   - CSV rows are grouped by External ID (deal ID) → one subscription per group
-  - Header fields are taken from the first row in each group
+  - Most header fields are taken from the first row in each group; EXCEPT
+    `Subscription Plan` and `Price Book`, which the DDL populates only on the
+    plan-defining row (NULL on component/add-on rows). Those two fields are
+    resolved by scanning all rows in the group for a non-empty value.
   - Each row produces a list of item names to include (split from comma-separated Sales Item cells)
   - Customer is resolved by company name → customer CSV External ID 2 → state tracker
   - Billing account is resolved by {deal_id}_BA → state tracker (if available)
@@ -145,7 +148,9 @@ class SubscriptionLoader(BaseLoader):
         Does NOT include subscriptionLine — NS auto-creates lines from the plan.
         Items to activate are stored in self._pending_lines[ext_id] for step 2.
         """
-        header = rows[0]  # Header fields are identical across rows in the group
+        # Most header fields are uniform across rows in the group; see exceptions
+        # noted inline for Subscription Plan and Price Book.
+        header = rows[0]
 
         customer_name = header.get("Customer", "").strip()
         customer_ext_id = self._customer_name_to_ext_id.get(customer_name.upper())
@@ -239,18 +244,47 @@ class SubscriptionLoader(BaseLoader):
                 return None
 
         # Default Renewal Subscription Plan
+        # NOTE (flagged, not fixed this pass): Default Renewal Subscription Plan is
+        # derived from BASE.SUBSCRIPTION_PLAN in the DDL, so it has the same
+        # non-uniform behaviour as Subscription Plan below — NULL on component
+        # rows, populated only on the plan-defining row. If rows[0] is a component
+        # row this will silently read blank and the field will be omitted from the
+        # payload. Apply the same scan-across-rows fix if required.
         renewal_plan = header.get("Default Renewal Subscription Plan", "").strip()
         if renewal_plan:
             payload["defaultRenewalSubscriptionPlan"] = {"refName": renewal_plan}
 
-        # Subscription plan — NS uses this to auto-create subscription lines
-        sub_plan = header.get("Subscription Plan", "").strip()
+        # Subscription plan — NS uses this to auto-create subscription lines.
+        # Subscription Plan is NOT uniform across grouped rows: the DDL populates
+        # it only on the plan-defining row and emits NULL on component/add-on
+        # rows. Row order in the group is driven by CSV order, which is not
+        # guaranteed, so `header`/`rows[0]` may land on a component row. Scan the
+        # whole group to find the first non-empty value instead.
+        sub_plan = next(
+            (
+                r.get("Subscription Plan", "").strip()
+                for r in rows
+                if r.get("Subscription Plan", "").strip()
+            ),
+            "",
+        )
         if sub_plan:
             payload["subscriptionPlan"] = {"refName": sub_plan}
 
-        # Price book
-        price_book = header.get("Price Book", "").strip()
-        if price_book and price_book != "NOT MAPPED":
+        # Price book — same non-uniform pattern as Subscription Plan. The
+        # PRICE_BOOK_MAPPING join in the DDL keys on SUBSCRIPTION_PLAN, so Price
+        # Book is NULL (→ 'NOT MAPPED' via COALESCE) wherever SUBSCRIPTION_PLAN is
+        # NULL. Skip blanks and the 'NOT MAPPED' sentinel; take the first real
+        # value found in the group.
+        price_book = next(
+            (
+                r.get("Price Book", "").strip()
+                for r in rows
+                if r.get("Price Book", "").strip() not in ("", "NOT MAPPED")
+            ),
+            "",
+        )
+        if price_book:
             payload["priceBook"] = {"refName": price_book}
 
         # PO#
@@ -344,7 +378,12 @@ class SubscriptionLoader(BaseLoader):
                 logger.error(f"  ✗ Failed: {error}")
 
         self.tracker.finish_run(run_id, total, success, failed, skipped)
-        summary = {"total": total, "success": success, "failed": failed, "skipped": skipped}
+        summary = {
+            "total": total,
+            "success": success,
+            "failed": failed,
+            "skipped": skipped,
+        }
         logger.info(f"=== {self.ENTITY_TYPE} complete: {summary} ===")
         return summary
 
@@ -366,7 +405,9 @@ class SubscriptionLoader(BaseLoader):
 
         lines = resp.json().get("subscriptionLine", {}).get("items", [])
         if not lines:
-            logger.warning(f"  Subscription {ns_id}: no auto-created lines found from plan")
+            logger.warning(
+                f"  Subscription {ns_id}: no auto-created lines found from plan"
+            )
             return
 
         # Build item refName → lineNumber map
