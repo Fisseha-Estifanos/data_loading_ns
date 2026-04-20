@@ -131,12 +131,12 @@ python main.py --report --failures                #    Include per-record error 
   - 5 name > 50 chars resolved and loaded; 1 customer-blocked record unblocked and loaded
   - Note: NS `name` field has a 50-char hard limit — final billing account name format TBD pending Moorepay/Tech discussion (Adam)
 
-- [~] **Load 49 subscriptions — 42/49 done**
+- [~] **Load 49 subscriptions — 43/49 done**
   - `python main.py --entity subscription`
-  - 7 failing records (require client/MoorePay input before retrying):
+  - 6 failing records (require client/MoorePay input before retrying):
     - **4 no-plan** (`396048163025`, `412482838771`, `412352092390`, `442541777135`): CSV has no Subscription Plan — NS rejects "no lines". Client must specify correct plan for NextGen ROI/Data Read Only subscriptions.
     - **1 no-price-book** (`437881274561` MV991, Moorepay NextGen M): `Price Book = NOT MAPPED` in CSV. Client must specify correct price book.
-    - **2 date-mismatch** (`478126306525` MFL50 start 01/04/2026, `385056850123` M28T0 start 01/02/2026): subscription start date < billing account start date. Options: PATCH billing account `startDate` in NS, omit billing account ref for these two, or get client to confirm correct dates.
+    - **1 date-mismatch** (`478126306525` VALE MILL, start 01/04/2026): subscription start date < billing account start date 15/04/2026. `385056850123` (BLACKMOOR) was unblocked and loaded ✅ after billing CSV A3 fix. For `478126306525`: REST API PATCH of BA startDate returned HTTP 204 but NS silently ignored the change — NS has a business rule preventing startDate from being moved earlier via API. **NS admin must change billing account `478126306525_BA` (NS ID 25659) startDate from 15/04/2026 to 01/04/2026 directly in the NS UI.** Then reset this record to pending and re-run.
 
 - [~] **Load 26 one-off invoices — 18/26 done**
   - `python main.py --entity oneOff`
