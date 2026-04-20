@@ -164,3 +164,79 @@ class BillingAccountLoader(BaseLoader):
         # Remove None values (e.g. blank startDate)
         payload = {k: v for k, v in payload.items() if v is not None}
         return payload
+
+    def patch_startdates(self, dry_run: bool = False) -> dict:
+        """
+        Read the billing CSV and PATCH startDate for any billing account whose
+        CSV startDate differs from the value currently in NetSuite.
+
+        Used for A3 fix: correcting billing account start dates so that
+        subscription start dates are no longer rejected by NS.
+        """
+        rows = self.read_csv()
+        total = len(rows)
+        patched = 0
+        skipped = 0
+        failed = 0
+
+        logger.info(f"=== Billing account startDate patch: {total} records in CSV ===")
+
+        for row in rows:
+            ext_id = self.get_external_id(row)
+            csv_start = row.get("startDate", "").strip()
+            if not csv_start:
+                logger.info(f"  SKIP {ext_id}: no startDate in CSV")
+                skipped += 1
+                continue
+
+            ns_id = self.tracker.get_netsuite_id(self.ENTITY_TYPE, ext_id)
+            if not ns_id:
+                logger.warning(f"  SKIP {ext_id}: no NS ID in state tracker (not yet loaded)")
+                skipped += 1
+                continue
+
+            # GET current startDate from NS
+            get_resp = self.client._request(
+                "GET", f"{config.BASE_URL}/billingAccount/{ns_id}"
+            )
+            if get_resp.status_code != 200:
+                logger.error(
+                    f"  {ext_id}: GET billingAccount/{ns_id} failed HTTP {get_resp.status_code}"
+                )
+                failed += 1
+                continue
+
+            ns_start = get_resp.json().get("startDate", "")
+            # NS returns dates as ISO strings e.g. "2026-02-27"; CSV is same format
+            if ns_start == csv_start:
+                logger.info(f"  SKIP {ext_id}: startDate already {ns_start} — no change needed")
+                skipped += 1
+                continue
+
+            logger.info(
+                f"  PATCH {ext_id} (NS {ns_id}): startDate {ns_start} → {csv_start}"
+                + (" [DRY RUN]" if dry_run else "")
+            )
+
+            if dry_run:
+                patched += 1
+                continue
+
+            patch_resp = self.client._request(
+                "PATCH",
+                f"{config.BASE_URL}/billingAccount/{ns_id}",
+                {"startDate": csv_start},
+            )
+            if patch_resp.status_code == 204:
+                logger.info(f"  ✓ {ext_id}: startDate → {csv_start}")
+                patched += 1
+            else:
+                logger.error(
+                    f"  ✗ {ext_id}: PATCH failed HTTP {patch_resp.status_code}: "
+                    f"{patch_resp.text[:300]}"
+                )
+                failed += 1
+
+        summary = {"total": total, "patched": patched, "skipped": skipped, "failed": failed}
+        logger.info(f"=== startDate patch complete: {summary} ===")
+        return summary

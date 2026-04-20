@@ -633,6 +633,15 @@ def main():
         action="store_true",
         help="Create Electronic Email Recipient records and link to customers (customer only)",
     )
+    parser.add_argument(
+        "--patch-ba-startdate",
+        action="store_true",
+        help=(
+            "PATCH billing account startDates from the billing CSV. "
+            "Compares CSV startDate against NS and PATCHes any that differ. "
+            "Use with --entity billingAccount."
+        ),
+    )
     args = parser.parse_args()
 
     log_file = setup_logging()
@@ -707,6 +716,21 @@ def _run(args, logger):
             )
             lines = ["\n" + "=" * 70, "  PATCH COMPLETE — SUMMARY", "=" * 70]
             for key in ("total", "success", "failed", "skipped"):
+                if key in result:
+                    lines.append(f"    {key:20s}: {result[key]}")
+            lines.append("=" * 70)
+            logger.info("\n".join(lines))
+            return
+
+        # ── Billing account startDate patch mode ─────────────────────────
+        if args.patch_ba_startdate:
+            if args.entity and args.entity != "billingAccount":
+                logger.error("--patch-ba-startdate only supports --entity billingAccount")
+                sys.exit(1)
+            loader = BillingAccountLoader(client, tracker)
+            result = loader.patch_startdates(dry_run=args.dry_run)
+            lines = ["\n" + "=" * 70, "  BA STARTDATE PATCH COMPLETE — SUMMARY", "=" * 70]
+            for key in ("total", "patched", "skipped", "failed"):
                 if key in result:
                     lines.append(f"    {key:20s}: {result[key]}")
             lines.append("=" * 70)
