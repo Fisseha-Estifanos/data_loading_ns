@@ -20,10 +20,16 @@ python main.py --dry-run --limit 1                #    Test a single record
 python main.py --entity customer                  # 3. Load customers (includes 9 custom fields automatically)
 python main.py --entity customer --patch-eer      #    Link Electronic Email Recipients (always a second step)
 python main.py --entity billingAccount            # 4. Load billing accounts (needs customers)
-python main.py --entity subscription              # 5. Load subscriptions (needs customers + billing)
-python main.py --entity oneOff                    # 6. Load one-off invoices (needs customers)
-python main.py --report                           # 7. Check state summary + field mapping
+python main.py --entity pricePlan                 # 5. Load price plans (needed before subscription)
+python main.py --entity subscription              # 6. Load subscriptions (needs customers + billing + price plans)
+python main.py --entity oneOff                    # 7. Load one-off invoices (needs customers)
+python main.py --report                           # 8. Check state summary + field mapping
 python main.py --report --failures                #    Include per-record error details
+
+# Retrofit (one-off — run after price plans are loaded):
+python scripts/retrofit_subscription_pricing.py --dry-run   # verify before applying
+python scripts/retrofit_subscription_pricing.py --apply     # attach pricePlan.id to already-loaded sub lines
+python scripts/retrofit_subscription_pricing.py --apply --limit 1  # smoke-test a single subscription
 ```
 
 | Flag | Description |
@@ -131,6 +137,18 @@ python main.py --report --failures                #    Include per-record error 
   - 5 name > 50 chars resolved and loaded; 1 customer-blocked record unblocked and loaded
   - Note: NS `name` field has a 50-char hard limit — final billing account name format TBD pending Moorepay/Tech discussion (Adam)
 
+- [x] **Load price plans — 632/632 done** ✅
+  - `python main.py --entity pricePlan`
+  - Reconciliation pass on startup seeds state DB from NS (idempotent re-runs)
+  - LIKE wildcard bug fixed: uses `MP\_PP\_%` ESCAPE `\\` to avoid matching unrelated sandbox plans
+  - All 632 rows accepted by NS REST `POST /pricePlan` with HTTP 204
+
+- [~] **Subscription line price-plan retrofit — dry-run verified, apply pending**
+  - Dry-run report: `scripts/reports/2026-04-27/retrofit_21-40-54.csv`
+  - Expected apply outcome: 98 PATCHed, 18 `PP_BLANK_IN_SOURCE` skipped, 162 `ORPHANED_IN_NS` skipped, 165 `MISSING_IN_NS` skipped
+  - Open questions before applying: see `data-team-handoff-2026-04-27.md` §3 (49% blank PP intent, divergent ambiguous combo, MISSING/ORPHANED handling)
+  - Run: `python scripts/retrofit_subscription_pricing.py --apply`
+
 - [~] **Load 52 subscriptions — 49/52 done**
   - CSV updated twice (A1 fix applied to 2 records across 2 rounds; 3 new ROI subscriptions added). Current file: `subscriptions-kleene-export-2026-04-20-A1-fix-applied-2-records.csv`
   - `python main.py --entity subscription`
@@ -144,7 +162,13 @@ python main.py --report --failures                #    Include per-record error 
     - **A2 — 1 NS business rule error** (`437881274561` MV991 POWERTICA, Moorepay NextGen M): subscriptionPlan and lines now resolve correctly but NS rejects with "First interval of an item cannot be deleted". NS admin action or client investigation needed.
     - **A3 — 1 date-mismatch** (`478126306525` VALE MILL, start 01/04/2026): billing account start date 15/04/2026 in NS. REST API PATCH silently ignored — NS prevents moving BA startDate earlier via API. **NS admin must change billing account `478126306525_BA` (NS ID 25659) startDate to 01/04/2026 in the NS UI.** Then reset to pending and re-run.
 
-- [~] **Load 26 one-off invoices — 18/26 done**
+- [ ] **Fix one-off loader fan-out grain** *(now in scope — restriction lifted)*
+  - Current CSV (`one-off-kleene-export-2026-04-27.csv`): 25 rows → 7 unique invoices. Same 1:N fan-out pattern as subs.
+  - Current loader is one-row-per-invoice. Running as-is emits 25 POSTs; NS rejects 18 as duplicate `externalId`s.
+  - Fix: group rows by `Invoice External ID` (same `itertools.groupby` / `defaultdict` pattern as subscription loader), build one invoice payload per group with all line items from the group. No price-plan field needed.
+  - After fix, re-run the 7 invoices + retry the 8 currently-blocked records (if NS admin unblocks them)
+
+- [~] **Load 26 one-off invoices — 18/26 done** *(blocked pending fan-out fix + NS admin)*
   - `python main.py --entity oneOff`
   - 8 failing records — all have items where NS `revenueRecognitionRule = "Rev Rec on Billing"` (items are tied to subscription billing engine; NS rejects them on manual invoices with "Invalid Field Value"). Affects: "Next Gen ROI (M) - Back Billing - Moorepayhr Managed", "Next Gen (M) - Contract Enforce - Managed payroll", "Next Gen ROI (M) - Contract Enforce - Managed payroll", "Next Gen (M/S) - Contract Enforce - Auto Enrolment", "Technical Delivery Tier 1" variants.
   - **Client action required:** MoorePay NS admin needs to either allow these items on manual invoices, or advise which generic substitute item to use.
