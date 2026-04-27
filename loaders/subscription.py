@@ -68,9 +68,12 @@ class SubscriptionLoader(BaseLoader):
         super().__init__(client, tracker)
         # Pre-load customer name → external ID mapping from customer CSV
         self._customer_name_to_ext_id = self._build_customer_name_map()
-        # Keyed by ext_id → list of item names from CSV with Lines: Include = T
-        # Populated during prepare_records(); consumed during load_all() step 2.
-        self._pending_lines: dict[str, list[str]] = {}
+        # ext_id → ordered list of (item_name, price_plan_external_id_or_None).
+        # price_plan_external_id is populated from the CSV's "Price Plan External ID"
+        # column. None means the row had no price plan (NS will fall back to the
+        # plan's default rate). The price plan internal ID is resolved at PATCH
+        # time via the state tracker.
+        self._pending_lines: dict[str, list[tuple[str, Optional[str]]]] = {}
 
     def _build_customer_name_map(self) -> dict:
         """Read customer CSV to build company name → External ID 2 lookup."""
@@ -128,6 +131,10 @@ class SubscriptionLoader(BaseLoader):
         Extract individual item names from a CSV row's Sales Item cell.
         Splits comma-separated values and strips zero-width spaces (U+200B artefacts).
         Only returns names from rows where Lines: Include = T.
+
+        Note on grain: the post-2026-04-27 export is normalised to one NS sales
+        item per row (no commas). The split-on-comma path is kept for safety in
+        case an older-shaped CSV is reprocessed.
         """
         include = row.get("Lines: Include", "").strip()
         if include != "T":
@@ -299,11 +306,29 @@ class SubscriptionLoader(BaseLoader):
         # TODO: payload["custrecord_indexation_date"] = header.get("Indexation Date", "").strip()
 
         # ── Collect items to activate (step 2 — not in POST payload) ────
-        items_to_include = []
+        # The new CSV grain is one row per (HS line × NS sales item). Multiple
+        # rows in a group can map to the same NS item refName (the 111
+        # ambiguous combos identified during recon). Per the agreed Option 1
+        # strategy: dedupe by item refName, keeping the FIRST non-blank
+        # Price Plan External ID seen for that item. Divergent prices across
+        # the dropped HS lines are not represented in NS — the retrofit /
+        # reconciliation report calls those out separately.
+        items_seen: dict[str, Optional[str]] = {}
+        items_order: list[str] = []
         for row in rows:
+            include = row.get("Lines: Include", "").strip()
+            if include != "T":
+                continue
+            row_pp = (row.get("Price Plan External ID") or "").strip() or None
             for name in self._extract_item_names(row):
-                if name not in items_to_include:
-                    items_to_include.append(name)
+                if name not in items_seen:
+                    items_seen[name] = row_pp
+                    items_order.append(name)
+                elif items_seen[name] is None and row_pp is not None:
+                    # Backfill if the first row we saw had no PP but a later one does.
+                    items_seen[name] = row_pp
+
+        items_to_include = [(name, items_seen[name]) for name in items_order]
         self._pending_lines[ext_id] = items_to_include
 
         # Clean None values
@@ -388,12 +413,24 @@ class SubscriptionLoader(BaseLoader):
         return summary
 
     def _activate_subscription_lines(
-        self, ext_id: str, ns_id: str, items_to_include: list[str]
+        self,
+        ext_id: str,
+        ns_id: str,
+        items_to_include: list[tuple[str, Optional[str]]],
     ) -> None:
         """
         GET all auto-created lines for a subscription, then PATCH the ones in
-        items_to_include to isIncluded=True.
-        Logs a warning for any item not found in the plan's auto-created lines.
+        items_to_include to isIncluded=True. Each entry is
+        (item_name, price_plan_external_id_or_None).
+
+        For each line we PATCH:
+          - isIncluded: true
+          - pricePlan.id: <internal id from state DB>  (only if the CSV row
+            had a Price Plan External ID and that plan resolved to an NS id)
+
+        Blank price plan → omit the field; NS will use the plan's default rate.
+        Non-blank but unresolved → log a warning, still PATCH isIncluded=True
+        without pricePlan, so the line is at least active.
         """
         url = f"{config.BASE_URL}/subscription/{ns_id}?expandSubResources=true"
         resp = self.client._request("GET", url)
@@ -421,7 +458,7 @@ class SubscriptionLoader(BaseLoader):
             f"(sub {ns_id}, plan has {len(lines)} total lines)"
         )
 
-        for item_name in items_to_include:
+        for item_name, pp_ext_id in items_to_include:
             line_num = item_to_line_num.get(item_name)
             if line_num is None:
                 logger.warning(
@@ -429,12 +466,32 @@ class SubscriptionLoader(BaseLoader):
                     f"Available: {list(item_to_line_num.keys())}"
                 )
                 continue
+
+            patch_body: dict = {"isIncluded": True}
+            pp_status = "no price plan in CSV"
+            if pp_ext_id:
+                pp_ns_id = self.tracker.get_netsuite_id("pricePlan", pp_ext_id)
+                if pp_ns_id:
+                    patch_body["pricePlan"] = {"id": pp_ns_id}
+                    pp_status = f"pricePlan={pp_ns_id} (extId={pp_ext_id})"
+                else:
+                    pp_status = (
+                        f"pricePlan extId {pp_ext_id} unresolved in state DB — "
+                        f"line activated WITHOUT pricePlan"
+                    )
+                    logger.warning(
+                        f"  ⚠ Price plan {pp_ext_id} not in state tracker; "
+                        f"sub {ns_id} line {line_num} ({item_name}) will use plan default."
+                    )
+
             line_url = (
                 f"{config.BASE_URL}/subscription/{ns_id}/subscriptionLine/{line_num}"
             )
-            patch_resp = self.client._request("PATCH", line_url, {"isIncluded": True})
+            patch_resp = self.client._request("PATCH", line_url, patch_body)
             if patch_resp.status_code == 204:
-                logger.info(f"  ✓ Line {line_num} ({item_name}) → isIncluded=True")
+                logger.info(
+                    f"  ✓ Line {line_num} ({item_name}) → isIncluded=True | {pp_status}"
+                )
             else:
                 logger.error(
                     f"  ✗ Failed to activate line {line_num} ({item_name}): "
