@@ -41,6 +41,7 @@ from state_tracker import StateTracker
 from loaders import (
     CustomerLoader,
     BillingAccountLoader,
+    PricePlanLoader,
     SubscriptionLoader,
     OneOffLoader,
 )
@@ -75,11 +76,18 @@ def setup_logging(log_dir: str = "logs"):
 
 # ─── Entity Registry ────────────────────────────────────────────────────
 
-ENTITY_ORDER = ["customer", "billingAccount", "subscription", "oneOff"]
+ENTITY_ORDER = [
+    "customer",
+    "billingAccount",
+    "pricePlan",
+    "subscription",
+    "oneOff",
+]
 
 LOADER_MAP = {
     "customer": CustomerLoader,
     "billingAccount": BillingAccountLoader,
+    "pricePlan": PricePlanLoader,
     "subscription": SubscriptionLoader,
     "oneOff": OneOffLoader,
 }
@@ -336,6 +344,31 @@ FIELD_MAPS = {
             ),
         ],
         "not_sent": [],
+    },
+    "pricePlan": {
+        "endpoint": "POST /record/v1/pricePlan",
+        "csv_file": "price-plans CSV (one row per HS line × NS sales item)",
+        "fields": [
+            (
+                "PRICE_PLAN_EXTERNAL_ID",
+                "externalId",
+                "direct",
+                "str",
+                "MP_PP_<line_item_id>_<slug(NS_sales_item)>",
+            ),
+            (
+                "PRICE_PLAN_JSON",
+                "(whole payload)",
+                "passthrough",
+                "json",
+                "Pre-shaped by Snowflake — currency, pricePlanType, minimumAmount, "
+                "maximumAmount, priceTiers.items[]",
+            ),
+        ],
+        "not_sent": [
+            "LINE_ITEM_ID — internal-only, used as part of externalId slug",
+            "NETSUITE_SALES_ITEMS — internal-only, used as part of externalId slug",
+        ],
     },
     "subscription": {
         "endpoint": "POST /record/v1/subscription",
@@ -725,11 +758,17 @@ def _run(args, logger):
         # ── Billing account startDate patch mode ─────────────────────────
         if args.patch_ba_startdate:
             if args.entity and args.entity != "billingAccount":
-                logger.error("--patch-ba-startdate only supports --entity billingAccount")
+                logger.error(
+                    "--patch-ba-startdate only supports --entity billingAccount"
+                )
                 sys.exit(1)
             loader = BillingAccountLoader(client, tracker)
             result = loader.patch_startdates(dry_run=args.dry_run)
-            lines = ["\n" + "=" * 70, "  BA STARTDATE PATCH COMPLETE — SUMMARY", "=" * 70]
+            lines = [
+                "\n" + "=" * 70,
+                "  BA STARTDATE PATCH COMPLETE — SUMMARY",
+                "=" * 70,
+            ]
             for key in ("total", "patched", "skipped", "failed"):
                 if key in result:
                     lines.append(f"    {key:20s}: {result[key]}")
@@ -743,7 +782,7 @@ def _run(args, logger):
         # Dependency check: warn if loading a child without its parent
         dependency_map = {
             "billingAccount": ["customer"],
-            "subscription": ["customer", "billingAccount"],
+            "subscription": ["customer", "billingAccount", "pricePlan"],
             "oneOff": ["customer"],
         }
         if args.entity and args.entity in dependency_map:
