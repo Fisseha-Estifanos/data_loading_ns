@@ -608,11 +608,15 @@ def print_report(tracker: StateTracker, show_failures: bool = False):
             failed = tracker.get_failed(entity)
             if not failed:
                 continue
-            lines.append(f"\n  [{entity}] — {len(failed)} failures:")
+            lines.append("")
+            lines.append("*" * 70)
+            lines.append(f"****  {entity.upper()}  —  {len(failed)} failure(s)  ****")
+            lines.append("*" * 70)
             for rec in failed:
-                lines.append(f"    extId={rec['external_id']}")
-                lines.append(f"      error: {rec['error_message'][:500]}")
-                lines.append(f"      at:    {rec['attempted_at']}")
+                lines.append(f"  extId : {rec['external_id']}")
+                lines.append(f"  error : {rec['error_message'][:500]}")
+                lines.append(f"  at    : {rec['attempted_at']}")
+                lines.append("")
 
     lines.append("\n" + "=" * 70 + "\n")
 
@@ -796,11 +800,13 @@ def _run(args, logger):
                         f"Parent references may fail."
                     )
 
-        # Run loaders
+        # Run loaders — keep references so we can inspect post-run state
         results = {}
+        loaders = {}
         for entity in entities_to_load:
             loader_class = LOADER_MAP[entity]
             loader = loader_class(client, tracker)
+            loaders[entity] = loader
 
             if args.dry_run:
                 logger.info(f"DRY RUN: preparing {entity} payloads...")
@@ -831,6 +837,16 @@ def _run(args, logger):
                 for key in ("success", "failed", "skipped"):
                     if key in result:
                         lines.append(f"    {key:20s}: {result[key]}")
+
+        # Re-emit any phone truncation warnings so they appear at the bottom too
+        customer_loader = loaders.get("customer")
+        if customer_loader and getattr(customer_loader, "phone_truncations", []):
+            lines.append("\n" + "=" * 70)
+            lines.append("  ⚠  PHONE WARNINGS (blanked before POST)")
+            lines.append("=" * 70)
+            for msg in customer_loader.phone_truncations:
+                lines.append(f"  {msg}")
+
         lines.append("\n" + "=" * 70)
         logger.info("\n".join(lines))
 

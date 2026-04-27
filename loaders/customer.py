@@ -161,6 +161,12 @@ class CustomerLoader(BaseLoader):
     RECORD_TYPE = "customer"
     CSV_PATH = config.CUSTOMERS_CSV
 
+    def __init__(self, client, tracker):
+        super().__init__(client, tracker)
+        # Collects one entry per phone truncation so main.py can re-emit them
+        # at the bottom of the run (they also log inline during build_payload).
+        self.phone_truncations: list[str] = []
+
     def get_external_id(self, row: dict) -> str:
         return row.get("External ID 2", "").strip()
 
@@ -182,13 +188,28 @@ class CustomerLoader(BaseLoader):
         currency_code = row.get("Currency", "").strip()
         currency_id = CURRENCY_MAP.get(currency_code)
 
+        # NS hard limit: phone field max 32 characters.
+        # If the CSV value exceeds this, blank it and log visibly rather than
+        # failing the whole record. The original value is preserved in the log.
+        _NS_PHONE_MAX = 32
+        phone_raw = row.get("Phone", "").strip()
+        if len(phone_raw) > _NS_PHONE_MAX:
+            msg = (
+                f"PHONE BLANKED [{ext_id}] '{company_name}': "
+                f"{len(phone_raw)} chars exceeds NS {_NS_PHONE_MAX}-char limit — "
+                f"original: {phone_raw!r}"
+            )
+            logger.warning(msg)
+            self.phone_truncations.append(msg)
+            phone_raw = ""
+
         payload = {
             "externalId": ext_id,
             "companyName": company_name,
             "isPerson": False,
             "subsidiary": {"id": subsidiary_id},
             "email": row.get("Email", "").strip() or None,
-            "phone": row.get("Phone", "").strip() or None,
+            "phone": phone_raw or None,
             "altPhone": row.get("Alt. Phone", "").strip() or None,
         }
 
