@@ -162,11 +162,10 @@ python scripts/retrofit_subscription_pricing.py --apply --limit 1  # smoke-test 
     - **A2 — 1 NS business rule error** (`437881274561` MV991 POWERTICA, Moorepay NextGen M): subscriptionPlan and lines now resolve correctly but NS rejects with "First interval of an item cannot be deleted". NS admin action or client investigation needed.
     - **A3 — 1 date-mismatch** (`478126306525` VALE MILL, start 01/04/2026): billing account start date 15/04/2026 in NS. REST API PATCH silently ignored — NS prevents moving BA startDate earlier via API. **NS admin must change billing account `478126306525_BA` (NS ID 25659) startDate to 01/04/2026 in the NS UI.** Then reset to pending and re-run.
 
-- [ ] **Fix one-off loader fan-out grain** *(now in scope — restriction lifted)*
-  - Current CSV (`one-off-kleene-export-2026-04-27.csv`): 25 rows → 7 unique invoices. Same 1:N fan-out pattern as subs.
-  - Current loader is one-row-per-invoice. Running as-is emits 25 POSTs; NS rejects 18 as duplicate `externalId`s.
-  - Fix: group rows by `Invoice External ID` (same `itertools.groupby` / `defaultdict` pattern as subscription loader), build one invoice payload per group with all line items from the group. No price-plan field needed.
-  - After fix, re-run the 7 invoices + retry the 8 currently-blocked records (if NS admin unblocks them)
+- [x] **Fix one-off loader fan-out grain** ✅
+  - CSV (`one-off-kleene-export-2026-04-27.csv`): 25 rows → 7 unique invoices.
+  - `OneOffLoader` now overrides `prepare_records()` to group rows by `Invoice External ID`, building one invoice payload per group with all rows' items as line items. Same `defaultdict` pattern as subscription loader.
+  - After re-run: 7 invoices will be attempted; 8 still blocked on `revenueRecognitionRule` — see task below.
 
 - [~] **Load 26 one-off invoices — 18/26 done** *(blocked pending fan-out fix + NS admin)*
   - `python main.py --entity oneOff`

@@ -15,7 +15,7 @@ The DDL layer in Snowflake has evolved significantly since the first round of lo
 - **Price plan loader** (`loaders/price_plan.py`) — **632/632 loaded** into NS sandbox `4874529-sb3`. Reconciliation pass fixes the `LIKE` wildcard bug (escaped to `MP\_PP\_%` with `ESCAPE '\\'` to avoid matching sandbox junk like `MPBPP1`). Loader is idempotent via state DB seed.
 - **Subscription loader updated** — `loaders/subscription.py` now injects `pricePlan.id` per line from the state DB. The 1:N fan-out grain from the new CSV (943 rows / ~49 deals) is handled correctly by the existing grouping logic.
 - **Retrofit script** (`scripts/retrofit_subscription_pricing.py`) — dry-run verified: 98 `WOULD_PATCH`, 18 `PP_BLANK_IN_SOURCE`, 162 `ORPHANED_IN_NS`, 165 `MISSING_IN_NS`. **Apply run pending** — run `python scripts/retrofit_subscription_pricing.py --apply` to execute the PATCHes.
-- **One-off loader** — now in scope for the fan-out grain fix (restriction lifted; see §What's next, item 4).
+- **One-off loader** — fan-out grain fix done. `OneOffLoader` now groups by `Invoice External ID` (same pattern as subscription loader).
 
 ### What changed upstream (Snowflake) since the original load
 
@@ -44,7 +44,7 @@ The DDL layer in Snowflake has evolved significantly since the first round of lo
 
 3. ~~**`subscription.py` update**~~ — ✅ **Done.** `pricePlan.id` injection per line from state DB. 1:N fan-out grain verified with new 943-row CSV.
 
-4. **`one_off.py` fan-out grain fix** — **(now in scope — restriction lifted).** The current `OneOffLoader` is one-row-per-invoice. The new `one-off-kleene-export-2026-04-27.csv` has 25 rows across 7 distinct `Invoice External ID`s (same 1:N fan-out as subs CSV). Running as-is would emit 25 POSTs and NS would reject 18 as duplicate `externalId`s. Fix: group rows by `Invoice External ID` (same pattern as subscription loader's grouping by deal), build one invoice payload per group with line items from all rows in that group. No price-plan reference needed (one-offs carry rate inline).
+4. ~~**`one_off.py` fan-out grain fix**~~ — ✅ **Done.** `OneOffLoader` now overrides `prepare_records()` to group by `Invoice External ID`, building one invoice payload per group with all rows contributing line items. Same `defaultdict` pattern as subscription loader. No price-plan reference needed (one-offs carry rate inline).
 
 ### Data drift warning for retrofit work
 
@@ -88,7 +88,7 @@ netsuite_loader/
 │   ├── billing_account.py # CSV → NetSuite billingAccount payload (refs customer)
 │   ├── price_plan.py      # CSV → NetSuite pricePlan payload (no NS parent deps)
 │   ├── subscription.py    # CSV → NetSuite subscription payload (refs customer + billing acct + price plan per line)
-│   └── one_off.py         # CSV → NetSuite invoice payload (refs customer) — fan-out fix in progress
+│   └── one_off.py         # CSV → NetSuite invoice payload (refs customer) — groups by Invoice External ID
 ├── scripts/
 │   └── retrofit_subscription_pricing.py  # One-off PATCH script: attach pricePlan.id to existing sub lines
 ├── data/                  # CSV files from Snowflake exports (active files per config.py)

@@ -1,14 +1,25 @@
 """
 One-Off Invoice Loader
 =======================
-Maps oneoffkleeneexport CSV → NetSuite Invoice (or Custom) records.
+Maps one-off CSV → NetSuite Invoice records.
 
 These are one-time charges linked to subscriptions.
 Dependencies: Customer must be loaded first.
+
+Grouping logic (1:N fan-out grain):
+  The Snowflake DDL produces one row per (HS line item × NS sales item), so a
+  single invoice can span multiple CSV rows all sharing the same Invoice External ID.
+  This loader groups by Invoice External ID and builds one NS invoice per group,
+  with each row in the group contributing one line item.
+
+  Header fields (Customer, Subsidiary, Currency, Date) are taken from rows[0] —
+  they are uniform across all rows in a group.
+  Line fields (Item, Quantity, Rate, Description) differ per row.
 """
 
 import csv
 import logging
+from collections import defaultdict
 from typing import Optional
 
 import config
@@ -36,7 +47,6 @@ class OneOffLoader(BaseLoader):
 
     def __init__(self, client, tracker):
         super().__init__(client, tracker)
-        # Build customer name → external ID from customer CSV
         self._customer_name_to_ext_id = {}
         try:
             with open(config.CUSTOMERS_CSV, "r", encoding="utf-8-sig") as f:
@@ -57,11 +67,41 @@ class OneOffLoader(BaseLoader):
     def get_tier3_value(self, row: dict) -> Optional[str]:
         return self.get_external_id(row)
 
-    def build_payload(self, row: dict) -> Optional[dict]:
-        ext_id = self.get_external_id(row)
-        customer_name = row.get("Customer (Req)", "").strip()
+    # ── Override prepare_records to handle grouping ──────────────────────
 
-        # Resolve customer
+    def prepare_records(self) -> list[tuple[str, dict, dict]]:
+        """Group CSV rows by Invoice External ID, then build one payload per group."""
+        rows = self.read_csv()
+
+        groups: dict[str, list[dict]] = defaultdict(list)
+        for row in rows:
+            ext_id = (row.get("Invoice External ID") or "").strip()
+            if ext_id:
+                groups[ext_id].append(row)
+
+        records = []
+        for ext_id, group_rows in groups.items():
+            payload = self._build_grouped_payload(ext_id, group_rows)
+            if payload is None:
+                logger.warning(f"Skipping one-off {ext_id}: payload build failed")
+                continue
+            records.append((ext_id, payload, group_rows[0]))
+
+        return records
+
+    def build_payload(self, row: dict) -> Optional[dict]:
+        """Not used directly — see _build_grouped_payload."""
+        raise NotImplementedError("Use prepare_records for grouped logic")
+
+    def _build_grouped_payload(self, ext_id: str, rows: list[dict]) -> Optional[dict]:
+        """
+        Build a single invoice payload from a group of CSV rows that share the
+        same Invoice External ID. Header fields come from rows[0]; each row in
+        the group contributes one or more line items.
+        """
+        header = rows[0]
+
+        customer_name = header.get("Customer (Req)", "").strip()
         customer_ext_id = self._customer_name_to_ext_id.get(customer_name.upper())
         if not customer_ext_id:
             logger.error(f"One-off {ext_id}: cannot resolve customer '{customer_name}'")
@@ -72,7 +112,7 @@ class OneOffLoader(BaseLoader):
             logger.error(f"One-off {ext_id}: customer {customer_ext_id} has no NS ID")
             return None
 
-        subsidiary_name = row.get("Subsidiary", "").strip()
+        subsidiary_name = header.get("Subsidiary", "").strip()
         subsidiary_id = SUBSIDIARY_MAP.get(subsidiary_name)
         if not subsidiary_id:
             logger.error(
@@ -81,7 +121,7 @@ class OneOffLoader(BaseLoader):
             )
             return None
 
-        currency_code = row.get("Currency", "").strip()
+        currency_code = header.get("Currency", "").strip()
         currency_id = CURRENCY_MAP.get(currency_code)
         if not currency_id:
             logger.error(
@@ -90,43 +130,60 @@ class OneOffLoader(BaseLoader):
             )
             return None
 
-        rate = row.get("Rate per line item", "").strip()
-        quantity = row.get("Quantity", "").strip()
-        if not quantity:
+        tran_date = header.get("Date (Req)", "").strip()
+
+        # Build line items from all rows in the group.
+        # New grain: one NS sales item per row (comma-split kept for safety in case
+        # an older-shaped CSV is ever reprocessed).
+        line_items = []
+        for row in rows:
+            item_names_raw = (row.get("Item") or "").strip().replace("​", "")
+            rate = (row.get("Rate per line item") or "").strip()
+            quantity = (row.get("Quantity") or "").strip()
+            description = (row.get("Description") or "").strip()
+
+            if not quantity:
+                logger.error(
+                    f"One-off {ext_id}: blank quantity on row with item '{item_names_raw}' — "
+                    f"skipping this invoice group."
+                )
+                return None
+
+            if item_names_raw and item_names_raw != "NOT MAPPED":
+                item_names = [p.strip() for p in item_names_raw.split(",") if p.strip()]
+            else:
+                item_names = []
+
+            if item_names:
+                for name in item_names:
+                    line: dict = {
+                        "item": {"refName": name},
+                        "quantity": float(quantity),
+                    }
+                    if rate:
+                        line["rate"] = float(rate)
+                    if description:
+                        line["description"] = description
+                    line_items.append(line)
+            else:
+                # Description-only line (no item reference)
+                line = {"quantity": float(quantity)}
+                if rate:
+                    line["rate"] = float(rate)
+                if description:
+                    line["description"] = description
+                line_items.append(line)
+
+            # Revenue recognition dates — custom columns on the line; field names TBD
+            # rev_start = (row.get("Revenue Start Date Per Line Item") or "").strip()
+            # rev_end   = (row.get("Revenue End Date Per Line Item") or "").strip()
+            # TODO: map to custcol_xxx once the script IDs are confirmed
+
+        if not line_items:
             logger.error(
-                f"One-off {ext_id}: blank quantity — cannot default to 1. "
-                f"Ensure the source CSV has a Quantity value for this row."
+                f"One-off {ext_id}: no line items could be built from {len(rows)} row(s)"
             )
             return None
-        description = row.get("Description", "").strip()
-        tran_date = row.get("Date (Req)", "").strip()
-        item_names_raw = row.get("Item", "").strip().replace("\u200b", "")
-
-        # Split comma-separated item names into individual line items.
-        # Each item in the list gets its own line with the same rate, quantity, and description.
-        if item_names_raw and item_names_raw != "NOT MAPPED":
-            item_names = [p.strip() for p in item_names_raw.split(",") if p.strip()]
-        else:
-            item_names = []
-
-        line_items = []
-        for name in item_names:
-            line = {
-                "item": {"refName": name},
-                "quantity": float(quantity),
-                "rate": float(rate) if rate else None,
-                "description": description,
-            }
-            line_items.append({k: v for k, v in line.items() if v is not None})
-
-        # If no items resolved, send a line without an item reference (description-only)
-        if not line_items:
-            line = {
-                "quantity": float(quantity),
-                "rate": float(rate) if rate else None,
-                "description": description,
-            }
-            line_items.append({k: v for k, v in line.items() if v is not None})
 
         payload = {
             "externalId": ext_id,
@@ -137,15 +194,4 @@ class OneOffLoader(BaseLoader):
             "item": {"items": line_items},
         }
 
-        # Revenue recognition dates — likely custom columns on the line
-        rev_start = row.get("Revenue Start Date Per Line Item", "").strip()
-        rev_end = row.get("Revenue End Date Per Line Item", "").strip()
-        if rev_start:
-            # TODO: Map to custcol_xxx on the line item
-            pass
-        if rev_end:
-            # TODO: Map to custcol_xxx on the line item
-            pass
-
-        payload = {k: v for k, v in payload.items() if v is not None}
-        return payload
+        return {k: v for k, v in payload.items() if v is not None}
