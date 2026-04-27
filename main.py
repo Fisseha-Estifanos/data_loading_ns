@@ -5,13 +5,15 @@ NetSuite Data Loader — Main Orchestrator
 Runs entity loaders in dependency order:
   1. Customer
   2. Billing Account  (← depends on Customer)
-  3. Subscription      (← depends on Customer + Billing Account)
-  4. One-Off Invoice   (← depends on Customer)
+  3. Price Plan       (no NS parent deps — refs sales items by name only)
+  4. Subscription     (← depends on Customer + Billing Account + Price Plan per line)
+  5. One-Off Invoice  (← depends on Customer)
 
 Usage:
   python main.py                         # Run all entities in order
   python main.py --entity customer       # Run only customers
   python main.py --entity billingAccount # Run only billing accounts
+  python main.py --entity pricePlan      # Run only price plans
   python main.py --entity subscription   # Run only subscriptions
   python main.py --entity oneOff         # Run only one-off invoices
   python main.py --report                # Show state summary without loading
