@@ -57,8 +57,15 @@ def _normalize_item(name: str) -> str:
     byte-exact join misses those rows and they surface as ORPHANED.
     Collapsing runs of whitespace to a single space — and stripping ZWSPs —
     fixes ~14 false-positive orphans without risk of matching unrelated items.
+
+    Args:
+        name: The item name to normalize
+
+    Returns:
+        The normalized item name
     """
     return re.sub(r"\s+", " ", (name or "").replace("​", "")).strip()
+
 
 # Project root on path so loader/client/tracker imports resolve
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -73,15 +80,17 @@ logger = logging.getLogger("retrofit")
 
 
 # ── Outcome codes (one per line in the report) ─────────────────────────
-PATCHED = "PATCHED"                                       # line was PATCHed successfully
-WOULD_PATCH = "WOULD_PATCH"                               # dry-run; PATCH was prepared
-ALREADY_LINKED = "ALREADY_LINKED"                         # line already has the right pricePlan
-PP_BLANK_IN_SOURCE = "PP_BLANK_IN_SOURCE"                 # CSV row has no PP; nothing to attach
-PP_NOT_LOADED = "PP_NOT_LOADED"                           # CSV references a PP not in state DB
-DIVERGENT_AMBIGUOUS = "DIVERGENT_AMBIGUOUS"               # 2+ HS lines for same (deal, item), differing prices
-ORPHANED_IN_NS = "ORPHANED_IN_NS"                         # NS line has no source row
-MISSING_IN_NS = "MISSING_IN_NS"                           # source row has no NS line
-PATCH_FAILED = "PATCH_FAILED"                             # API rejected the PATCH
+PATCHED = "PATCHED"  # line was PATCHed successfully
+WOULD_PATCH = "WOULD_PATCH"  # dry-run; PATCH was prepared
+ALREADY_LINKED = "ALREADY_LINKED"  # line already has the right pricePlan
+PP_BLANK_IN_SOURCE = "PP_BLANK_IN_SOURCE"  # CSV row has no PP; nothing to attach
+PP_NOT_LOADED = "PP_NOT_LOADED"  # CSV references a PP not in state DB
+DIVERGENT_AMBIGUOUS = (
+    "DIVERGENT_AMBIGUOUS"  # 2+ HS lines for same (deal, item), differing prices
+)
+ORPHANED_IN_NS = "ORPHANED_IN_NS"  # NS line has no source row
+MISSING_IN_NS = "MISSING_IN_NS"  # source row has no NS line
+PATCH_FAILED = "PATCH_FAILED"  # API rejected the PATCH
 
 
 # ── Source CSV → (deal, item) → price plan map ─────────────────────────
@@ -101,6 +110,12 @@ def build_source_map(subs_csv: str) -> tuple[dict, set]:
 
     Item names are normalised the same way the subscription loader does
     (strip + zero-width-space removal) so they line up with NS line refNames.
+
+    Args:
+        subs_csv: Path to the subs CSV file
+
+    Returns:
+        A tuple containing the pp_by_key dictionary and the ambiguous_keys set
     """
     pp_by_key: dict[tuple[str, str], dict] = {}
     ambiguous_keys: set[tuple[str, str]] = set()
@@ -138,19 +153,32 @@ def build_source_map(subs_csv: str) -> tuple[dict, set]:
 
 
 def fetch_subscription_lines(client: NetSuiteClient, sub_ns_id: str) -> Optional[list]:
-    """GET a subscription with sub-resources expanded; return the line list or None."""
+    """GET a subscription with sub-resources expanded; return the line list or None.
+
+    Args:
+        client: The NetSuite client
+        sub_ns_id: The subscription NS ID
+
+    Returns:
+        A list of subscription lines or None
+    """
     url = f"{config.BASE_URL}/subscription/{sub_ns_id}?expandSubResources=true"
     resp = client._request("GET", url)
     if resp.status_code != 200:
-        logger.error(
-            f"  Cannot GET subscription {sub_ns_id}: HTTP {resp.status_code}"
-        )
+        logger.error(f"  Cannot GET subscription {sub_ns_id}: HTTP {resp.status_code}")
         return None
     return resp.json().get("subscriptionLine", {}).get("items", [])
 
 
 def existing_price_plan_id(line: dict) -> Optional[str]:
-    """Extract the existing pricePlan.id from a line, if any."""
+    """Extract the existing pricePlan.id from a line, if any.
+
+    Args:
+        line: The subscription line
+
+    Returns:
+        The existing pricePlan.id or None
+    """
     pp = line.get("pricePlan") or {}
     pid = pp.get("id")
     return str(pid) if pid else None
@@ -159,7 +187,17 @@ def existing_price_plan_id(line: dict) -> Optional[str]:
 def patch_line(
     client: NetSuiteClient, sub_ns_id: str, line_num: int, pp_ns_id: str
 ) -> tuple[bool, str]:
-    """PATCH a single line with pricePlan.id. Returns (ok, error_message)."""
+    """PATCH a single line with pricePlan.id. Returns (ok, error_message).
+
+    Args:
+        client: The NetSuite client
+        sub_ns_id: The subscription NS ID
+        line_num: The line number
+        pp_ns_id: The price plan NS ID
+
+    Returns:
+        A tuple containing a boolean indicating success and an error message
+    """
     url = f"{config.BASE_URL}/subscription/{sub_ns_id}/subscriptionLine/{line_num}"
     body = {"pricePlan": {"id": pp_ns_id}}
     resp = client._request("PATCH", url, body)
@@ -182,6 +220,16 @@ def retrofit(
     Walk every loaded subscription, derive its expected pricePlan per line,
     and either log or apply the PATCH. Also walk the source map to flag any
     (deal, item) combos that have no NS line at all.
+
+    Args:
+        client: The NetSuite client
+        tracker: The state tracker
+        apply: Whether to apply the changes
+        limit: The number of subscriptions to process
+        report_writer: The CSV writer
+
+    Returns:
+        A dictionary containing the counts of each outcome
     """
     pp_by_key, ambiguous_keys = build_source_map(config.SUBSCRIPTIONS_CSV)
     logger.info(
@@ -203,7 +251,9 @@ def retrofit(
     seen_keys_in_ns: set[tuple[str, str]] = set()
 
     for i, (deal_id, sub_ns_id) in enumerate(subscriptions, 1):
-        logger.info(f"[{i}/{len(subscriptions)}] Subscription {deal_id} (NS {sub_ns_id})")
+        logger.info(
+            f"[{i}/{len(subscriptions)}] Subscription {deal_id} (NS {sub_ns_id})"
+        )
         lines = fetch_subscription_lines(client, sub_ns_id)
         if lines is None:
             counts["GET_FAILED"] += 1
@@ -346,6 +396,12 @@ def retrofit(
 
 
 def setup_logging(log_path: str) -> None:
+    """
+    Setup logging configuration.
+
+    Args:
+        log_path: Path to the log file
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)-7s] %(name)s: %(message)s",
@@ -358,6 +414,12 @@ def setup_logging(log_path: str) -> None:
 
 
 def main() -> int:
+    """
+    Main entry point for the script.
+
+    Returns:
+        The exit code
+    """
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     parser.add_argument(
         "--apply",
@@ -389,7 +451,9 @@ def main() -> int:
     log_path = os.path.join(date_folder, f"retrofit_{fname_suffix}.log")
 
     setup_logging(log_path)
-    logger.info(f"Mode: {'APPLY (PATCHes will be sent)' if apply else 'DRY-RUN (no PATCHes)'}")
+    logger.info(
+        f"Mode: {'APPLY (PATCHes will be sent)' if apply else 'DRY-RUN (no PATCHes)'}"
+    )
     logger.info(f"Report CSV : {report_path}")
     logger.info(f"Log file   : {log_path}")
 
