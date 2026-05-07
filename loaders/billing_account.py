@@ -96,11 +96,14 @@ class BillingAccountLoader(BaseLoader):
             return None
 
         # ── Resolve Customer Internal ID ────────────────────────────────
-        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id)
+        # Customer was loaded with a revisioned externalId; the state tracker
+        # is keyed on that, so suffix the raw CSV value before lookup.
+        customer_ext_id_rev = config.apply_revision(customer_ext_id)
+        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id_rev)
         if not customer_ns_id:
             logger.error(
                 f"Cannot create billing account {ext_id}: "
-                f"customer {customer_ext_id} has no NetSuite ID in state tracker. "
+                f"customer {customer_ext_id_rev} has no NetSuite ID in state tracker. "
                 f"Ensure customers are loaded first."
             )
             return None
@@ -189,9 +192,14 @@ class BillingAccountLoader(BaseLoader):
                 skipped += 1
                 continue
 
-            ns_id = self.tracker.get_netsuite_id(self.ENTITY_TYPE, ext_id)
+            # State tracker is keyed on the revisioned externalId.
+            ns_id = self.tracker.get_netsuite_id(
+                self.ENTITY_TYPE, config.apply_revision(ext_id)
+            )
             if not ns_id:
-                logger.warning(f"  SKIP {ext_id}: no NS ID in state tracker (not yet loaded)")
+                logger.warning(
+                    f"  SKIP {ext_id}: no NS ID in state tracker (not yet loaded)"
+                )
                 skipped += 1
                 continue
 
