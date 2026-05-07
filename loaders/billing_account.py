@@ -22,6 +22,44 @@ from loaders.base import BaseLoader
 logger = logging.getLogger(__name__)
 
 
+# NS hard limit on the billingAccount.name field. Names exceeding this fail
+# with HTTP 400 "field name contained more than the maximum number ( 50 ) of
+# characters allowed." We truncate visibly rather than skip the record.
+_NS_BA_NAME_MAX = 50
+
+
+def _truncate_ba_name(name: str, max_len: int = _NS_BA_NAME_MAX) -> tuple[str, bool]:
+    """
+    If name exceeds max_len, truncate the company-name portion while preserving
+    the standard trailing `_<Frequency>_MP_<Currency>` suffix.
+
+    Returns (new_name, was_truncated). new_name is guaranteed <= max_len.
+
+    Linkage note: BAs are linked to subscriptions/customers by NS internal ID
+    (resolved via the state tracker by externalId), NOT by name. Truncating
+    here only affects the human-readable label in NS — downstream loaders
+    are unaffected.
+    """
+    if len(name) <= max_len:
+        return name, False
+    # Locate the standard suffix: `_<Freq>_MP_<Curr>`. Find `_MP_` from the
+    # right, then walk back to the underscore before it (start of `_Freq`).
+    mp_idx = name.rfind("_MP_")
+    if mp_idx == -1:
+        return name[:max_len].rstrip(" ,._-&"), True
+    freq_start = name.rfind("_", 0, mp_idx)
+    if freq_start == -1:
+        return name[:max_len].rstrip(" ,._-&"), True
+    suffix = name[freq_start:]
+    budget = max_len - len(suffix)
+    if budget <= 0:
+        # Suffix alone exceeds the limit — degrade to plain right-trim.
+        return name[:max_len].rstrip(" ,._-&"), True
+    company = name[:freq_start]
+    truncated_company = company[:budget].rstrip(" ,._-&")
+    return f"{truncated_company}{suffix}", True
+
+
 class BillingAccountLoader(BaseLoader):
 
     ENTITY_TYPE = "billingAccount"
@@ -36,6 +74,9 @@ class BillingAccountLoader(BaseLoader):
         self._ship_addr_map: dict = (
             {}
         )  # customer NS ID → default shipping addressbook ID
+        # Collected one entry per name truncation so main.py can re-emit them
+        # at the bottom of the run.
+        self.name_truncations: list[str] = []
         self._load_address_maps()
 
     def _load_address_maps(self):
@@ -82,11 +123,15 @@ class BillingAccountLoader(BaseLoader):
         return "name"
 
     def get_tier3_value(self, row: dict) -> Optional[str]:
-        return row.get("name", "").strip()
+        # Match the value POSTed (which may have been truncated) so SuiteQL
+        # name-lookups still find the record we created.
+        raw = row.get("name", "").strip()
+        truncated, _ = _truncate_ba_name(raw)
+        return truncated
 
     def build_payload(self, row: dict) -> Optional[dict]:
         ext_id = self.get_external_id(row)
-        name = row.get("name", "").strip()
+        raw_name = row.get("name", "").strip()
         customer_ext_id = row.get("customer_externalId", "").strip()
 
         if not ext_id or not customer_ext_id:
@@ -94,6 +139,20 @@ class BillingAccountLoader(BaseLoader):
                 "Skipping billing account: missing externalId or customer_externalId"
             )
             return None
+
+        # NS rejects names > 50 chars. Truncate the company portion while
+        # preserving the `_<Frequency>_MP_<Currency>` suffix so the label is
+        # still recognisable. Linkages downstream are by NS internal ID, not
+        # name, so this is a label-only change.
+        name, name_was_truncated = _truncate_ba_name(raw_name)
+        if name_was_truncated:
+            msg = (
+                f"NAME TRUNCATED [{ext_id}]: {len(raw_name)} chars exceeds NS "
+                f"{_NS_BA_NAME_MAX}-char limit — original: {raw_name!r}, "
+                f"used: {name!r}"
+            )
+            logger.warning(msg)
+            self.name_truncations.append(msg)
 
         # ── Resolve Customer Internal ID ────────────────────────────────
         # Customer was loaded with a revisioned externalId; the state tracker

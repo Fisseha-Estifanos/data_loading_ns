@@ -857,6 +857,15 @@ def _run(args, logger):
             for msg in customer_loader.phone_truncations:
                 lines.append(f"  {msg}")
 
+        # Same for any billing-account name truncations (NS 50-char limit on `name`)
+        ba_loader = loaders.get("billingAccount")
+        if ba_loader and getattr(ba_loader, "name_truncations", []):
+            lines.append("\n" + "=" * 70)
+            lines.append("  ⚠  BILLING ACCOUNT NAME TRUNCATIONS (>50 chars)")
+            lines.append("=" * 70)
+            for msg in ba_loader.name_truncations:
+                lines.append(f"  {msg}")
+
         lines.append("\n" + "=" * 70)
         logger.info("\n".join(lines))
 
