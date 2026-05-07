@@ -70,21 +70,30 @@ class OneOffLoader(BaseLoader):
     # ── Override prepare_records to handle grouping ──────────────────────
 
     def prepare_records(self) -> list[tuple[str, dict, dict]]:
-        """Group CSV rows by Invoice External ID, then build one payload per group."""
+        """Group CSV rows by Invoice External ID, then build one payload per group.
+
+        Grouping is keyed on the RAW invoice ext_id (no revision suffix). The
+        records tuple uses the revisioned form so state-DB writes and POST
+        externalId stay consistent.
+        """
         rows = self.read_csv()
 
         groups: dict[str, list[dict]] = defaultdict(list)
         for row in rows:
-            ext_id = (row.get("Invoice External ID") or "").strip()
-            if ext_id:
-                groups[ext_id].append(row)
+            raw_ext_id = (row.get("Invoice External ID") or "").strip()
+            if raw_ext_id:
+                groups[raw_ext_id].append(row)
 
         records = []
-        for ext_id, group_rows in groups.items():
-            payload = self._build_grouped_payload(ext_id, group_rows)
+        for raw_ext_id, group_rows in groups.items():
+            payload = self._build_grouped_payload(raw_ext_id, group_rows)
             if payload is None:
-                logger.warning(f"Skipping one-off {ext_id}: payload build failed")
+                logger.warning(
+                    f"Skipping one-off {raw_ext_id}: payload build failed"
+                )
                 continue
+            ext_id = config.apply_revision(raw_ext_id)
+            payload["externalId"] = ext_id
             records.append((ext_id, payload, group_rows[0]))
 
         return records
@@ -93,30 +102,42 @@ class OneOffLoader(BaseLoader):
         """Not used directly — see _build_grouped_payload."""
         raise NotImplementedError("Use prepare_records for grouped logic")
 
-    def _build_grouped_payload(self, ext_id: str, rows: list[dict]) -> Optional[dict]:
+    def _build_grouped_payload(
+        self, raw_ext_id: str, rows: list[dict]
+    ) -> Optional[dict]:
         """
         Build a single invoice payload from a group of CSV rows that share the
         same Invoice External ID. Header fields come from rows[0]; each row in
         the group contributes one or more line items.
+
+        `raw_ext_id` is the invoice external ID with NO revision suffix.
+        Parent customer lookup suffixes the revision before consulting the state
+        tracker, since the customer was written with a revisioned externalId.
         """
         header = rows[0]
 
         customer_name = header.get("Customer (Req)", "").strip()
         customer_ext_id = self._customer_name_to_ext_id.get(customer_name.upper())
         if not customer_ext_id:
-            logger.error(f"One-off {ext_id}: cannot resolve customer '{customer_name}'")
+            logger.error(
+                f"One-off {raw_ext_id}: cannot resolve customer '{customer_name}'"
+            )
             return None
 
-        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id)
+        customer_ext_id_rev = config.apply_revision(customer_ext_id)
+        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id_rev)
         if not customer_ns_id:
-            logger.error(f"One-off {ext_id}: customer {customer_ext_id} has no NS ID")
+            logger.error(
+                f"One-off {raw_ext_id}: customer {customer_ext_id_rev} has no NS ID"
+            )
             return None
 
         subsidiary_name = header.get("Subsidiary", "").strip()
         subsidiary_id = SUBSIDIARY_MAP.get(subsidiary_name)
         if not subsidiary_id:
             logger.error(
-                f"One-off {ext_id}: unmapped subsidiary '{subsidiary_name}' — cannot default. "
+                f"One-off {raw_ext_id}: unmapped subsidiary "
+                f"'{subsidiary_name}' — cannot default. "
                 f"Add it to SUBSIDIARY_MAP in loaders/one_off.py."
             )
             return None
@@ -125,7 +146,8 @@ class OneOffLoader(BaseLoader):
         currency_id = CURRENCY_MAP.get(currency_code)
         if not currency_id:
             logger.error(
-                f"One-off {ext_id}: unmapped currency '{currency_code}' — cannot default. "
+                f"One-off {raw_ext_id}: unmapped currency "
+                f"'{currency_code}' — cannot default. "
                 f"Add it to CURRENCY_MAP in loaders/one_off.py."
             )
             return None
@@ -144,8 +166,8 @@ class OneOffLoader(BaseLoader):
 
             if not quantity:
                 logger.error(
-                    f"One-off {ext_id}: blank quantity on row with item '{item_names_raw}' — "
-                    f"skipping this invoice group."
+                    f"One-off {raw_ext_id}: blank quantity on row with item "
+                    f"'{item_names_raw}' — skipping this invoice group."
                 )
                 return None
 
@@ -181,12 +203,15 @@ class OneOffLoader(BaseLoader):
 
         if not line_items:
             logger.error(
-                f"One-off {ext_id}: no line items could be built from {len(rows)} row(s)"
+                f"One-off {raw_ext_id}: no line items could be built from "
+                f"{len(rows)} row(s)"
             )
             return None
 
+        # The base loader's prepare_records() will overwrite payload["externalId"]
+        # with the revisioned form before POSTing.
         payload = {
-            "externalId": ext_id,
+            "externalId": raw_ext_id,
             "entity": {"id": customer_ns_id},
             "subsidiary": {"id": subsidiary_id},
             "currency": {"id": currency_id},

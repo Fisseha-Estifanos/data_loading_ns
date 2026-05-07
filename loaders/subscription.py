@@ -102,22 +102,31 @@ class SubscriptionLoader(BaseLoader):
     # ── Override prepare_records to handle grouping ──────────────────────
 
     def prepare_records(self) -> list[tuple[str, dict, dict]]:
-        """Group CSV rows by External ID, then build one payload per group."""
+        """Group CSV rows by External ID, then build one payload per group.
+
+        Grouping is keyed on the RAW deal ID (no revision suffix). The records
+        tuple returned to base.load_all uses the revisioned externalId so that
+        state-DB writes and POST externalId are consistent.
+        """
         rows = self.read_csv()
 
-        # Group rows by External ID (deal ID)
+        # Group rows by raw External ID (deal ID)
         groups = defaultdict(list)
         for row in rows:
-            ext_id = row.get("External ID", "").strip()
-            if ext_id:
-                groups[ext_id].append(row)
+            raw_ext_id = row.get("External ID", "").strip()
+            if raw_ext_id:
+                groups[raw_ext_id].append(row)
 
         records = []
-        for ext_id, group_rows in groups.items():
-            payload = self._build_grouped_payload(ext_id, group_rows)
+        for raw_ext_id, group_rows in groups.items():
+            payload = self._build_grouped_payload(raw_ext_id, group_rows)
             if payload is None:
-                logger.warning(f"Skipping subscription {ext_id}: payload build failed")
+                logger.warning(
+                    f"Skipping subscription {raw_ext_id}: payload build failed"
+                )
                 continue
+            ext_id = config.apply_revision(raw_ext_id)
+            payload["externalId"] = ext_id
             records.append((ext_id, payload, group_rows[0]))
 
         return records
@@ -149,11 +158,18 @@ class SubscriptionLoader(BaseLoader):
                 names.append(name)
         return names
 
-    def _build_grouped_payload(self, ext_id: str, rows: list[dict]) -> Optional[dict]:
+    def _build_grouped_payload(
+        self, raw_ext_id: str, rows: list[dict]
+    ) -> Optional[dict]:
         """
         Build a subscription POST payload from a group of CSV rows.
         Does NOT include subscriptionLine — NS auto-creates lines from the plan.
-        Items to activate are stored in self._pending_lines[ext_id] for step 2.
+        Items to activate are stored in self._pending_lines[raw_ext_id] for step 2.
+
+        `raw_ext_id` is the deal ID with NO revision suffix. Parent-entity
+        lookups (customer, billing account, price plan) all suffix the revision
+        before consulting the state tracker, since those parents were written
+        with revisioned externalIds.
         """
         # Most header fields are uniform across rows in the group; see exceptions
         # noted inline for Subscription Plan and Price Book.
@@ -163,27 +179,32 @@ class SubscriptionLoader(BaseLoader):
         customer_ext_id = self._customer_name_to_ext_id.get(customer_name.upper())
         if not customer_ext_id:
             logger.error(
-                f"Subscription {ext_id}: cannot resolve customer '{customer_name}' to external ID"
+                f"Subscription {raw_ext_id}: cannot resolve customer "
+                f"'{customer_name}' to external ID"
             )
             return None
 
-        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id)
+        customer_ext_id_rev = config.apply_revision(customer_ext_id)
+        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id_rev)
         if not customer_ns_id:
             logger.error(
-                f"Subscription {ext_id}: customer {customer_ext_id} has no NS ID. "
-                f"Ensure customers are loaded first."
+                f"Subscription {raw_ext_id}: customer {customer_ext_id_rev} "
+                f"has no NS ID. Ensure customers are loaded first."
             )
             return None
 
-        # Resolve billing account (may not exist for all subscriptions)
-        billing_account_ext_id = f"{ext_id}_BA"
+        # Resolve billing account (may not exist for all subscriptions).
+        # Convention: revision is the last token, so the BA ext_id is
+        # `<raw_deal>_BA<LOAD_REVISION>` (e.g. 442541777135_BA_rvn_02).
+        billing_account_ext_id = config.apply_revision(f"{raw_ext_id}_BA")
         billing_account_ns_id = self.tracker.get_netsuite_id(
             "billingAccount", billing_account_ext_id
         )
         if not billing_account_ns_id:
             logger.warning(
-                f"Subscription {ext_id}: no billing account found for {billing_account_ext_id}. "
-                f"Will create subscription without billing account reference."
+                f"Subscription {raw_ext_id}: no billing account found for "
+                f"{billing_account_ext_id}. Will create subscription without "
+                f"billing account reference."
             )
 
         # ── Header fields ───────────────────────────────────────────────
@@ -191,7 +212,8 @@ class SubscriptionLoader(BaseLoader):
         subsidiary_id = SUBSIDIARY_MAP.get(subsidiary_name)
         if not subsidiary_id:
             logger.error(
-                f"Subscription {ext_id}: unmapped subsidiary '{subsidiary_name}' — cannot default. "
+                f"Subscription {raw_ext_id}: unmapped subsidiary "
+                f"'{subsidiary_name}' — cannot default. "
                 f"Add it to SUBSIDIARY_MAP in loaders/subscription.py."
             )
             return None
@@ -200,13 +222,17 @@ class SubscriptionLoader(BaseLoader):
         currency_id = CURRENCY_MAP.get(currency_code)
         if not currency_id:
             logger.error(
-                f"Subscription {ext_id}: unmapped currency '{currency_code}' — cannot default. "
+                f"Subscription {raw_ext_id}: unmapped currency "
+                f"'{currency_code}' — cannot default. "
                 f"Add it to CURRENCY_MAP in loaders/subscription.py."
             )
             return None
 
+        # The base loader's prepare_records() will overwrite payload["externalId"]
+        # with the revisioned form. We set the raw value here so build/log output
+        # is human-readable; it's never the value POSTed.
         payload = {
-            "externalId": ext_id,
+            "externalId": raw_ext_id,
             "name": header.get("Subscription Name", "").strip(),
             "customer": {"id": customer_ns_id},
             "subsidiary": {"id": subsidiary_id},
@@ -232,8 +258,9 @@ class SubscriptionLoader(BaseLoader):
                 payload["initialTerm"] = {"id": term_id}
             else:
                 logger.error(
-                    f"Subscription {ext_id}: unmapped Initial Term '{initial_term_raw}' — "
-                    f"add to TERM_MAP in loaders/subscription.py"
+                    f"Subscription {raw_ext_id}: unmapped Initial Term "
+                    f"'{initial_term_raw}' — add to TERM_MAP in "
+                    f"loaders/subscription.py"
                 )
                 return None
 
@@ -245,8 +272,9 @@ class SubscriptionLoader(BaseLoader):
                 payload["defaultRenewalTerm"] = {"id": term_id}
             else:
                 logger.error(
-                    f"Subscription {ext_id}: unmapped Default Renewal Term '{renewal_term_raw}' — "
-                    f"add to TERM_MAP in loaders/subscription.py"
+                    f"Subscription {raw_ext_id}: unmapped Default Renewal Term "
+                    f"'{renewal_term_raw}' — add to TERM_MAP in "
+                    f"loaders/subscription.py"
                 )
                 return None
 
@@ -329,7 +357,9 @@ class SubscriptionLoader(BaseLoader):
                     items_seen[name] = row_pp
 
         items_to_include = [(name, items_seen[name]) for name in items_order]
-        self._pending_lines[ext_id] = items_to_include
+        # Key _pending_lines on the revisioned ext_id so load_all (which iterates
+        # records keyed on the revisioned form) can find the items at PATCH time.
+        self._pending_lines[config.apply_revision(raw_ext_id)] = items_to_include
 
         # Clean None values
         payload = {k: v for k, v in payload.items() if v is not None}
@@ -470,17 +500,21 @@ class SubscriptionLoader(BaseLoader):
             patch_body: dict = {"isIncluded": True}
             pp_status = "no price plan in CSV"
             if pp_ext_id:
-                pp_ns_id = self.tracker.get_netsuite_id("pricePlan", pp_ext_id)
+                # The CSV's `Price Plan External ID` is the raw form (no revision).
+                # Price plans were loaded with revisioned externalIds, so the
+                # state tracker is keyed on the revisioned form.
+                pp_ext_id_rev = config.apply_revision(pp_ext_id)
+                pp_ns_id = self.tracker.get_netsuite_id("pricePlan", pp_ext_id_rev)
                 if pp_ns_id:
                     patch_body["pricePlan"] = {"id": pp_ns_id}
-                    pp_status = f"pricePlan={pp_ns_id} (extId={pp_ext_id})"
+                    pp_status = f"pricePlan={pp_ns_id} (extId={pp_ext_id_rev})"
                 else:
                     pp_status = (
-                        f"pricePlan extId {pp_ext_id} unresolved in state DB — "
+                        f"pricePlan extId {pp_ext_id_rev} unresolved in state DB — "
                         f"line activated WITHOUT pricePlan"
                     )
                     logger.warning(
-                        f"  ⚠ Price plan {pp_ext_id} not in state tracker; "
+                        f"  ⚠ Price plan {pp_ext_id_rev} not in state tracker; "
                         f"sub {ns_id} line {line_num} ({item_name}) will use plan default."
                     )
 

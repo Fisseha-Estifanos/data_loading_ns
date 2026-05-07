@@ -11,6 +11,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 
+import config
 from netsuite_client import NetSuiteClient
 from state_tracker import StateTracker
 
@@ -107,12 +108,21 @@ class BaseLoader(ABC):
 
             logger.info(f"[{i}/{total}] Creating {self.ENTITY_TYPE}: {ext_id}")
 
+            tier3_field = self.get_tier3_field()
+            # When tier 3 fallback is keyed on externalId, the value to search
+            # NS by is the already-revisioned ext_id from the records tuple,
+            # not whatever raw value get_tier3_value would return from the row.
+            if tier3_field == "externalId":
+                tier3_value = ext_id
+            else:
+                tier3_value = self.get_tier3_value(row) if row else None
+
             status, ns_id, error = self.client.create_and_resolve_id(
                 record_type=self.RECORD_TYPE,
                 payload=payload,
                 external_id=ext_id,
-                tier3_field=self.get_tier3_field(),
-                tier3_value=self.get_tier3_value(row) if row else None,
+                tier3_field=tier3_field,
+                tier3_value=tier3_value,
             )
 
             # Determine which tier resolved the ID
@@ -152,18 +162,23 @@ class BaseLoader(ABC):
     def prepare_records(self) -> list[tuple[str, dict, dict]]:
         """
         Read CSV and build payloads. Returns list of (external_id, payload, raw_row).
-        Override this in subclasses that need grouping (e.g., subscriptions).
+        The external_id in the tuple — and payload["externalId"] — is the
+        revisioned form (raw + config.LOAD_REVISION). Override in subclasses
+        that need grouping (e.g., subscriptions); those overrides must apply
+        the same revisioning before returning.
         """
         rows = self.read_csv()
         records = []
         for row in rows:
-            ext_id = self.get_external_id(row)
-            if not ext_id:
+            raw_ext_id = self.get_external_id(row)
+            if not raw_ext_id:
                 logger.warning(f"Skipping row with no external ID: {row}")
                 continue
             payload = self.build_payload(row)
             if payload is None:
-                logger.warning(f"Skipping {ext_id}: build_payload returned None")
+                logger.warning(f"Skipping {raw_ext_id}: build_payload returned None")
                 continue
+            ext_id = config.apply_revision(raw_ext_id)
+            payload["externalId"] = ext_id
             records.append((ext_id, payload, row))
         return records

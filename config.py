@@ -24,11 +24,36 @@ SUITEQL_URL = (
 )
 
 # --- Data File Paths ---
-CUSTOMERS_CSV = "data/customers-kleene-export-2026-04-27.csv"
-BILLING_CSV = "data/billing-kleene-export-2026-04-27.csv"
-SUBSCRIPTIONS_CSV = "data/subs-kleene-export-2026-04-27.csv"
-ONEOFF_CSV = "data/one-off-kleene-export-2026-04-27.csv"
-PRICE_PLANS_CSV = "data/price-plans-kleene-export-2026-04-27.csv"
+CUSTOMERS_CSV = "data/customers-v2-kleene-export-2026-05-07.csv"
+BILLING_CSV = "data/billing-accounts-kleene-export-2026-05-07.csv"
+SUBSCRIPTIONS_CSV = "data/subscriptions-kleene-export-2026-05-07.csv"
+ONEOFF_CSV = "data/one-offs-kleene-export-2026-05-07.csv"
+PRICE_PLANS_CSV = "data/pricing-kleene-export-2026-05-07.csv"
+
+# --- Load Revision ---
+# Suffix appended to every externalId (and every parent-lookup ext_id) for the
+# current load batch. Bump this string for each fresh re-load so new records
+# land in NS with new externalIds rather than colliding with prior revisions.
+#
+# Convention: the very last token of every ext_id we POST is this string.
+#   customer:        <External ID 2>_rvn_02
+#   billingAccount:  <deal_id>_BA_rvn_02
+#   pricePlan:       MP_PP_<line_id>_<slug>_rvn_02
+#   subscription:    <deal_id>_rvn_02
+#   oneOff invoice:  <Invoice External ID>_rvn_02
+#   EER record:      <customer ext>_EER_rvn_02
+#
+# Old revisions (e.g. _rvn_01) remain in NS untouched. State DB rows for prior
+# revisions are preserved for audit; new revision rows are added alongside.
+LOAD_REVISION = "_rvn_02"
+
+
+def apply_revision(raw_ext_id: str) -> str:
+    """Append LOAD_REVISION to a raw externalId. No-op for empty strings."""
+    if not raw_ext_id:
+        return raw_ext_id
+    return f"{raw_ext_id}{LOAD_REVISION}"
+
 
 # --- State Tracking ---
 STATE_DB = "state/load_state.db"

@@ -291,7 +291,11 @@ class CustomerLoader(BaseLoader):
                 continue
 
             logger.info(f"[{i}/{total}] Patching customer: {ext_id}")
-            resp = self.client.patch_record(self.RECORD_TYPE, ext_id, payload)
+            # patch_record looks up the customer by externalId via /eid:{...},
+            # so we must pass the revisioned form that was actually written to NS.
+            resp = self.client.patch_record(
+                self.RECORD_TYPE, config.apply_revision(ext_id), payload
+            )
 
             if resp.status_code in (200, 204):
                 logger.info(f"  ✓ Patched {ext_id} (HTTP {resp.status_code})")
@@ -354,7 +358,9 @@ class CustomerLoader(BaseLoader):
                 skipped += 1
                 continue
 
-            eer_ext_id = f"{ext_id}_EER"
+            # Revision is the last token in every ext_id by convention.
+            # Construct as `<raw>_EER` then suffix the revision once.
+            eer_ext_id = config.apply_revision(f"{ext_id}_EER")
 
             if dry_run:
                 logger.info(
@@ -391,10 +397,12 @@ class CustomerLoader(BaseLoader):
 
             logger.info(f"  EER record id={eer_id}")
 
-            # Step 2: PATCH customer to link the EER record
+            # Step 2: PATCH customer to link the EER record. The customer was
+            # written with a revisioned externalId; patch_record resolves by
+            # externalId so we must pass the revisioned form here.
             resp = self.client.patch_record(
                 self.RECORD_TYPE,
-                ext_id,
+                config.apply_revision(ext_id),
                 {"custentity_zellis_elec_email_recipients": {"id": eer_id}},
             )
 

@@ -48,21 +48,25 @@ class PricePlanLoader(BaseLoader):
 
     def _reconcile_existing_plans(self) -> None:
         """
-        Pull every existing MP_PP_* price plan from NS and seed the state DB
-        with externalId → internalId. On re-runs this guarantees the loader
-        skips POSTs for plans NS already has even if local state was wiped.
+        Pull existing MP_PP_*<LOAD_REVISION> price plans from NS and seed the
+        state DB with externalId → internalId. Scoped to the current load
+        revision so prior-revision plans (e.g. _rvn_01) don't leak in and
+        confuse the parent-lookup chain when subscriptions inject pricePlan.id.
         """
         logger.info(
-            "Reconciling existing MP_PP_* price plans from NetSuite "
-            "(seeds the state DB so re-runs skip already-loaded plans)..."
+            "Reconciling existing MP_PP_*%s price plans from NetSuite "
+            "(seeds the state DB so re-runs skip already-loaded plans)...",
+            config.LOAD_REVISION,
         )
+        # Both '_' and '%' inside the revision suffix must be escaped — '_' is
+        # a single-char wildcard in SQL LIKE. Build the pattern explicitly.
+        rev = config.LOAD_REVISION
+        rev_escaped = rev.replace("_", "\\_").replace("%", "\\%")
+        like_pattern = f"MP\\_PP\\_%{rev_escaped}"
         try:
-            # Underscores must be escaped: '_' is a single-char wildcard in
-            # SQL LIKE, so 'MP_PP_%' would also match 'MPBPP1' and similar
-            # externalIds left in this sandbox by earlier work.
             rows = self.client.suiteql_query(
                 "SELECT id, externalid FROM pricePlan "
-                "WHERE externalid LIKE 'MP\\_PP\\_%' ESCAPE '\\'"
+                f"WHERE externalid LIKE '{like_pattern}' ESCAPE '\\'"
             )
         except Exception as e:
             logger.warning(
@@ -127,8 +131,10 @@ class PricePlanLoader(BaseLoader):
             )
             return None
 
-        # Sanity-check the externalId in the JSON matches the CSV column.
+        # Sanity-check the externalId in the JSON matches the (raw) CSV column.
         # If they disagree, the CSV is internally inconsistent — fail loud.
+        # The base loader's prepare_records() will overwrite payload["externalId"]
+        # with the revisioned form before POSTing, so we don't touch it here.
         json_ext = (payload.get("externalId") or "").strip()
         if json_ext and json_ext != ext_id:
             logger.error(

@@ -708,6 +708,16 @@ def _run(args, logger):
         )
         sys.exit(1)
 
+    # Announce the active load revision. Every externalId POSTed in this run
+    # will end with config.LOAD_REVISION; bumping the constant produces a
+    # fresh batch that doesn't collide with prior NS records.
+    logger.info(
+        "=" * 70 + "\n"
+        f"  LOAD REVISION: {config.LOAD_REVISION!r}\n"
+        f"  Every externalId POSTed (and every parent-lookup) ends with this suffix.\n"
+        + "=" * 70
+    )
+
     # Init components
     client = NetSuiteClient()
     tracker = StateTracker()

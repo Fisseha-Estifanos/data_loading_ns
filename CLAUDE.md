@@ -54,6 +54,59 @@ The DDL layer in Snowflake has evolved significantly since the first round of lo
 
 ---
 
+## 🔁 Load Revisions (`config.LOAD_REVISION`)
+
+Every external ID this loader POSTs ends with the suffix in
+`config.LOAD_REVISION` (currently `_rvn_02`). Bump the constant for each
+fresh re-load batch — new records land in NS with new externalIds rather
+than colliding with prior revisions. The state DB keeps rows from every
+revision side-by-side for audit; nothing is wiped.
+
+Why: NS upserts by externalId. Re-POSTing with old IDs breaks for entities
+where most fields are immutable post-creation (subscriptions especially —
+they require Subscription Change Orders, not direct PATCH).
+
+ID shapes (revision is always the LAST token):
+- customer:        `<External ID 2>_rvn_02`
+- billingAccount:  `<deal_id>_BA_rvn_02`
+- pricePlan:       `MP_PP_<line>_<slug>_rvn_02`
+- subscription:    `<deal_id>_rvn_02`
+- oneOff invoice:  `<Invoice External ID>_rvn_02`
+- EER record:      `<customer ext>_EER_rvn_02`
+
+Where the suffix is applied:
+- `BaseLoader.prepare_records()` auto-suffixes the ext_id placed in the
+  records tuple AND overrides `payload["externalId"]` before POST.
+- Subscription/one-off override `prepare_records` and apply the same
+  pattern (see those files).
+- Dependent loaders (BA→customer, subs→customer/BA/price plan,
+  oneOff→customer, EER→customer) wrap parent ext_ids with
+  `config.apply_revision(...)` before consulting the state tracker.
+- Price-plan reconciliation at startup is scoped to
+  `LIKE 'MP\_PP\_%<rev>'` so prior-revision plans don't leak in.
+- Tier-3 fallback when `tier3_field == "externalId"` uses the already-
+  suffixed value from the records tuple.
+
+Pre-flight before a fresh revisioned load:
+
+    python scripts/preflight_revision_load.py
+
+Read-only. Reports per-entity counts, state-DB collisions, and parent-lookup
+orphans. Run it before bumping the revision and before kicking off
+`python main.py`.
+
+Old revisions: leave alone (current decision, 2026-05-06). Records under
+`_rvn_01` remain in NS untouched. A parked deactivation script lives at
+`scripts/deactivate/deactivate_prior_revision.py` for future use; it is
+guarded by `REVIEWED=False` and must be hand-checked per entity type before
+any apply run.
+
+Retrofit script note: `scripts/retrofit_subscription_pricing.py` was built
+against `_rvn_01` records and is not revision-aware. If you need to run it
+again on `_rvn_02` records, audit the matching logic first.
+
+---
+
 ## ⛔ STRICT DATA INTEGRITY RULE — DO NOT MODIFY SOURCE DATA
 
 **This loader must never silently alter, default, or invent data values.**
