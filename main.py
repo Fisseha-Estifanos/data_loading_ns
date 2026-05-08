@@ -576,17 +576,32 @@ def print_field_mapping_report():
 # ─── Report ─────────────────────────────────────────────────────────────
 
 
-def print_report(tracker: StateTracker, show_failures: bool = False):
-    """Print a summary of the current load state — to both terminal and log file."""
+def print_report(
+    tracker: StateTracker,
+    show_failures: bool = False,
+    all_revisions: bool = False,
+):
+    """Print a summary of the current load state.
+
+    By default the report is scoped to the active `config.LOAD_REVISION` —
+    only rows whose external_id ends with that suffix are counted, so prior-
+    revision failures don't pollute the current view. Pass `all_revisions=True`
+    (or run with `--all-revisions`) for the historical cross-revision view.
+
+    Output is logged via `report` logger which routes to BOTH the terminal
+    and the per-run log file via the root logger's handlers.
+    """
     report_logger = logging.getLogger("report")
+    rev_filter = None if all_revisions else config.LOAD_REVISION
+    scope_label = "ALL revisions" if all_revisions else f"revision {config.LOAD_REVISION!r}"
 
     lines = []
     lines.append("\n" + "=" * 70)
-    lines.append("  LOAD STATE REPORT")
+    lines.append(f"  LOAD STATE REPORT — scope: {scope_label}")
     lines.append("=" * 70)
 
     for entity in ENTITY_ORDER:
-        summary = tracker.summary(entity)
+        summary = tracker.summary(entity, revision_suffix=rev_filter)
         if not summary:
             lines.append(f"\n  {entity:20s}  — no records tracked")
             continue
@@ -596,16 +611,16 @@ def print_report(tracker: StateTracker, show_failures: bool = False):
         for status, count in sorted(summary.items()):
             lines.append(f"    {status:20s}: {count}")
 
-        missing = tracker.get_missing_ids(entity)
+        missing = tracker.get_missing_ids(entity, revision_suffix=rev_filter)
         if missing:
             lines.append(f"    ⚠ {len(missing)} records created but NS ID unresolved")
 
     if show_failures:
         lines.append("\n" + "-" * 70)
-        lines.append("  FAILED RECORDS")
+        lines.append(f"  FAILED RECORDS — scope: {scope_label}")
         lines.append("-" * 70)
         for entity in ENTITY_ORDER:
-            failed = tracker.get_failed(entity)
+            failed = tracker.get_failed(entity, revision_suffix=rev_filter)
             if not failed:
                 continue
             lines.append("")
@@ -621,9 +636,9 @@ def print_report(tracker: StateTracker, show_failures: bool = False):
     lines.append("\n" + "=" * 70 + "\n")
 
     output = "\n".join(lines)
-    # Print to terminal
-    print(output)
-    # Also write to log file
+    # report_logger.info routes to BOTH file and terminal via the root logger's
+    # FileHandler + StreamHandler. A separate `print(output)` would duplicate
+    # the report on the terminal, so we don't.
     report_logger.info(output)
 
 
@@ -641,6 +656,14 @@ def main():
     )
     parser.add_argument(
         "--failures", action="store_true", help="Include failure details in report"
+    )
+    parser.add_argument(
+        "--all-revisions",
+        action="store_true",
+        help=(
+            "Show state report across ALL revisions (default scopes to "
+            "config.LOAD_REVISION so prior-revision rows don't pollute totals)."
+        ),
     )
     parser.add_argument(
         "--field-map",
@@ -687,13 +710,83 @@ def main():
     logger = logging.getLogger("main")
 
     try:
-        _run(args, logger)
+        _run(args, logger, log_file)
     except Exception:
         logger.exception("Unhandled error — see traceback above")
         sys.exit(1)
 
 
-def _run(args, logger):
+def write_revision_status(
+    tracker: StateTracker, run_results: dict, per_run_log_path: str
+) -> None:
+    """Append a short status section to the per-revision rolling log.
+
+    File path: `logs/<revision-without-leading-underscore>/overall_status.log`
+      e.g. config.LOAD_REVISION='_rvn_02' → 'logs/rvn_02/overall_status.log'
+
+    Each script invocation appends one section showing:
+      - this run's per-entity counts (only the entities loaded this run)
+      - the cumulative state for this revision across all 5 entities
+    Open the file any time to see "where am I in this revision overall."
+    """
+    rev = config.LOAD_REVISION
+    rev_path = rev.lstrip("_") or "default"
+    out_dir = os.path.join("logs", rev_path)
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "overall_status.log")
+
+    gmt3 = timezone(timedelta(hours=3))
+    now = datetime.now(gmt3).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+    lines: list[str] = []
+    lines.append("=" * 72)
+    entities_run = ", ".join(run_results.keys()) or "(none)"
+    lines.append(f"Run @ {now} — entities: {entities_run}")
+    lines.append(f"Per-run log: {per_run_log_path}")
+    lines.append("-" * 72)
+
+    # This run's outcomes (only entities that actually ran)
+    lines.append("This run:")
+    if not run_results:
+        lines.append("  (no entity loaders ran)")
+    else:
+        for entity, result in run_results.items():
+            if result.get("dry_run"):
+                lines.append(
+                    f"  {entity:18s} DRY RUN — {result.get('total', 0)} record(s)"
+                )
+                continue
+            parts = [
+                f"{k}={result.get(k, 0)}" for k in ("success", "failed", "skipped")
+                if k in result
+            ]
+            total = result.get("total", 0)
+            lines.append(
+                f"  {entity:18s} total={total}  " + "  ".join(parts)
+            )
+
+    # Cumulative revision state across all 5 entities
+    lines.append(f"Revision {rev} cumulative:")
+    for entity in ENTITY_ORDER:
+        summary = tracker.summary(entity, revision_suffix=rev)
+        if not summary:
+            lines.append(f"  {entity:18s} — not loaded —")
+            continue
+        total = sum(summary.values())
+        success = summary.get("success", 0) + summary.get("success_no_id", 0)
+        failed = summary.get("failed", 0)
+        bits = [f"{success}/{total} success"]
+        if failed:
+            bits.append(f"{failed} failed")
+        lines.append(f"  {entity:18s} " + ", ".join(bits))
+
+    lines.append("=" * 72 + "\n")
+
+    with open(out_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _run(args, logger, log_file: str):
 
     # Field mapping report — no credentials or tracker needed
     if args.field_map:
@@ -726,7 +819,11 @@ def _run(args, logger):
         # Report mode — include field mapping at top
         if args.report:
             print_field_mapping_report()
-            print_report(tracker, show_failures=args.failures)
+            print_report(
+                tracker,
+                show_failures=args.failures,
+                all_revisions=args.all_revisions,
+            )
             return
 
         # Preflight
@@ -869,8 +966,19 @@ def _run(args, logger):
         lines.append("\n" + "=" * 70)
         logger.info("\n".join(lines))
 
-        # Print report
-        print_report(tracker, show_failures=True)
+        # Print report — scoped to the active LOAD_REVISION by default so the
+        # tail of every load is the *current* revision's state, not a mixture
+        # with stale prior-revision rows. Pass --all-revisions to see history.
+        print_report(
+            tracker,
+            show_failures=True,
+            all_revisions=args.all_revisions,
+        )
+
+        # Append a section to the per-revision rolling status file. One file
+        # per revision, append-only — open it any time to see "where am I in
+        # this revision overall."
+        write_revision_status(tracker, results, log_file)
 
     finally:
         tracker.close()

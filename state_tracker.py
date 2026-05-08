@@ -129,28 +129,68 @@ class StateTracker:
 
     # ─── Reporting ──────────────────────────────────────────────────────
 
-    def summary(self, entity_type: str) -> dict:
-        """Get counts by status for an entity type."""
-        rows = self.conn.execute(
-            "SELECT status, COUNT(*) as cnt FROM load_state WHERE entity_type = ? GROUP BY status",
-            (entity_type,),
-        ).fetchall()
+    def summary(
+        self, entity_type: str, revision_suffix: Optional[str] = None
+    ) -> dict:
+        """Get counts by status for an entity type.
+
+        If `revision_suffix` is given, only rows whose external_id ends with
+        that suffix are counted — used to scope reports to a single load
+        revision so prior-revision failures don't pollute current totals.
+        """
+        if revision_suffix:
+            sql = (
+                "SELECT status, COUNT(*) as cnt FROM load_state "
+                "WHERE entity_type = ? AND external_id LIKE ? "
+                "GROUP BY status"
+            )
+            params: tuple = (entity_type, f"%{revision_suffix}")
+        else:
+            sql = (
+                "SELECT status, COUNT(*) as cnt FROM load_state "
+                "WHERE entity_type = ? GROUP BY status"
+            )
+            params = (entity_type,)
+        rows = self.conn.execute(sql, params).fetchall()
         return {row["status"]: row["cnt"] for row in rows}
 
-    def get_failed(self, entity_type: str) -> list[dict]:
-        """Get all failed records for an entity type."""
-        rows = self.conn.execute(
-            "SELECT * FROM load_state WHERE entity_type = ? AND status = 'failed' ORDER BY attempted_at",
-            (entity_type,),
-        ).fetchall()
+    def get_failed(
+        self, entity_type: str, revision_suffix: Optional[str] = None
+    ) -> list[dict]:
+        """Get failed records for an entity, optionally scoped to a revision."""
+        if revision_suffix:
+            sql = (
+                "SELECT * FROM load_state WHERE entity_type = ? "
+                "AND status = 'failed' AND external_id LIKE ? "
+                "ORDER BY attempted_at"
+            )
+            params: tuple = (entity_type, f"%{revision_suffix}")
+        else:
+            sql = (
+                "SELECT * FROM load_state WHERE entity_type = ? "
+                "AND status = 'failed' ORDER BY attempted_at"
+            )
+            params = (entity_type,)
+        rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
-    def get_missing_ids(self, entity_type: str) -> list[dict]:
-        """Get records that were created but whose NS ID couldn't be resolved."""
-        rows = self.conn.execute(
-            "SELECT * FROM load_state WHERE entity_type = ? AND status = 'success_no_id'",
-            (entity_type,),
-        ).fetchall()
+    def get_missing_ids(
+        self, entity_type: str, revision_suffix: Optional[str] = None
+    ) -> list[dict]:
+        """Records created but whose NS ID couldn't be resolved, optionally scoped to a revision."""
+        if revision_suffix:
+            sql = (
+                "SELECT * FROM load_state WHERE entity_type = ? "
+                "AND status = 'success_no_id' AND external_id LIKE ?"
+            )
+            params: tuple = (entity_type, f"%{revision_suffix}")
+        else:
+            sql = (
+                "SELECT * FROM load_state WHERE entity_type = ? "
+                "AND status = 'success_no_id'"
+            )
+            params = (entity_type,)
+        rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def close(self):
