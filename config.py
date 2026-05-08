@@ -28,7 +28,7 @@ CUSTOMERS_CSV = "data/customers-v2-kleene-export-2026-05-07.csv"
 BILLING_CSV = "data/billing-accounts-kleene-export-2026-05-07.csv"
 SUBSCRIPTIONS_CSV = "data/subscriptions-kleene-export-2026-05-07.csv"
 ONEOFF_CSV = "data/one-offs-kleene-export-2026-05-07.csv"
-PRICE_PLANS_CSV = "data/pricing-kleene-export-2026-05-07.csv"
+PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-05-08.csv"
 
 # --- Load Revision ---
 # Suffix appended to every externalId (and every parent-lookup ext_id) for the
