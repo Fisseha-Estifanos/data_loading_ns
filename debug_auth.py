@@ -45,7 +45,10 @@ CONSUMER_KEY = env.get("NS_CONSUMER_KEY", "")
 CONSUMER_SECRET = env.get("NS_CONSUMER_SECRET", "")
 ACCESS_TOKEN = env.get("NS_ACCESS_TOKEN", "")
 TOKEN_SECRET = env.get("NS_TOKEN_SECRET", "")
-_realm_raw = env.get("NS_REALM", "4874529-sb3")
+_realm_raw = env.get("NS_REALM", "")
+if not _realm_raw:
+    print("ERROR: NS_REALM missing in .env")
+    sys.exit(1)
 # NetSuite OAuth realm must use uppercase + underscores (e.g. 4874529_SB3), not the URL form
 REALM = _realm_raw.upper().replace("-", "_")
 
