@@ -1,4 +1,8 @@
 .env
+.env.*
+# Prod state DB holds prod NetSuite internal IDs — never commit it.
+# (The sandbox state/load_state.db is intentionally tracked.)
+state/load_state_prod.db
 
 .venv
 
