@@ -14,7 +14,9 @@ TOKEN_SECRET = os.environ.get("NS_TOKEN_SECRET", "")
 
 # NS_REALM in .env is the URL account ID format, e.g. "4874529-sb3".
 # The OAuth Authorization header requires uppercase + underscores: "4874529_SB3".
-_realm_raw = os.environ.get("NS_REALM", "4874529-sb3")
+_realm_raw = os.environ.get("NS_REALM", "")
+if not _realm_raw:
+    raise ValueError("NS_REALM environment variable is required (e.g. '4874529-sb3')")
 REALM = _realm_raw.upper().replace("-", "_")  # used in OAuth header only
 
 # --- NetSuite API URLs (use original _realm_raw for the hostname) ---
@@ -26,7 +28,7 @@ SUITEQL_URL = (
 # --- Data File Paths ---
 CUSTOMERS_CSV = "data/customers-v2-kleene-export-2026-05-07.csv"
 BILLING_CSV = "data/billing-accounts-kleene-export-2026-05-07.csv"
-SUBSCRIPTIONS_CSV = "data/subscriptions-kleene-export-2026-05-07.csv"
+SUBSCRIPTIONS_CSV = "data/subs-kleene-export-2026-05-29.csv"
 ONEOFF_CSV = "data/one-offs-kleene-export-2026-05-07.csv"
 PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-05-08.csv"
 
@@ -56,8 +58,20 @@ def apply_revision(raw_ext_id: str) -> str:
 
 
 # --- State Tracking ---
-STATE_DB = "state/load_state.db"
-
+# The state DB is environment-specific: it stores NetSuite *internal IDs* for
+# every loaded record, and those IDs only mean anything in the account they
+# came from. NEVER point a prod load at the sandbox DB (or vice-versa) — the
+# sandbox internal IDs would be written into prod payloads as parent
+# references (customer.id, billingAccount.id, pricePlan.id) and link records
+# to the wrong entities. Override NS_STATE_DB alongside the NS_* creds so the
+# DB always travels with the account it describes.
+#   sandbox: NS_STATE_DB=state/load_state.db
+#   prod:    NS_STATE_DB=state/load_state_prod.db
+STATE_DB = os.environ.get("NS_STATE_DB", "")
+if not STATE_DB:
+    raise ValueError(
+        "NS_STATE_DB environment variable is required (e.g. 'state/load_state.db')"
+    )
 # --- Retry / Rate Limit ---
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
