@@ -104,10 +104,23 @@ python prod/seed_state.py --company-name "7 LAMPS SECURITY LTD" --netsuite-id 83
 # 5. Load the price plan(s) for this deal
 python main.py --dry-run --entity pricePlan
 python main.py --entity pricePlan
+#    → note the new price plan id from "Tier 1 success: extracted ID <PP_ID>"
+#    Confirm it landed (by externalId, then raw dump by internal id):
+python prod/prod_check.py externalid --type pricePlan --id MP_PP_453962471664_EMPLOYMENT_LAW_AL_rvn_prod_01
+python prod/prod_check.py record --type pricePlan --id <PP_ID>
 
 # 6. Load the billing account (auto-attaches the address)
 python main.py --dry-run --entity billingAccount
 python main.py --entity billingAccount
+#    → note the new billing account id from "Tier 1 success: extracted ID <BA_ID>"
+#    Confirm it landed AND the address attached (raw dump shows billAddressList/shipAddressList):
+python prod/prod_check.py externalid --type billingAccount --id 495006175463_27396_BA_rvn_prod_01
+python prod/prod_check.py record --type billingAccount --id <BA_ID>
+#Or use a dedicated billing helper (by external id or by customer)
+# this specific BA by its externalId:
+python prod/prod_check.py billing --externalid 495006175463_27396_BA_rvn_prod_01
+# or every BA belonging to the customer:
+python prod/prod_check.py billing --customer-id 830950
 
 # 7. Load the subscription (includes the line AND prices it via the interval fix)
 python main.py --entity subscription
