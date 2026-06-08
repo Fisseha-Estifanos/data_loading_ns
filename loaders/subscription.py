@@ -449,18 +449,26 @@ class SubscriptionLoader(BaseLoader):
         items_to_include: list[tuple[str, Optional[str]]],
     ) -> None:
         """
-        GET all auto-created lines for a subscription, then PATCH the ones in
-        items_to_include to isIncluded=True. Each entry is
-        (item_name, price_plan_external_id_or_None).
+        For each item in items_to_include, do two things:
+          1. PATCH subscriptionLine/{n} → isIncluded=True   (include the line)
+          2. Set the line's PRICE by repointing the subscription's auto-created
+             priceInterval (matched by lineNumber) at the MP_PP_ price plan we
+             loaded for that line.
 
-        For each line we PATCH:
-          - isIncluded: true
-          - pricePlan.id: <internal id from state DB>  (only if the CSV row
-            had a Price Plan External ID and that plan resolved to an NS id)
+        WHY (the price does NOT live on the subscription line):
+        When NS creates a subscription from a plan + price book it auto-builds
+        one `priceInterval` per line (keyed by subscriptionPlanLineNumber),
+        each pointing at its OWN auto-generated price plan copied from the book
+        — which for Moorepay's standard books is a £0 placeholder. The line's
+        rate comes from THAT interval. PATCHing `subscriptionLine.pricePlan`
+        does nothing (NS returns 204 and silently drops it — there is no such
+        writable field). The supported mechanism, verified against NS, is to
+        PATCH the interval's `pricePlan` to our loaded plan, which immediately
+        sets the interval's recurringAmount. (totalintervalvalue stays 0 in
+        DRAFT and computes on activation.)
 
-        Blank price plan → omit the field; NS will use the plan's default rate.
-        Non-blank but unresolved → log a warning, still PATCH isIncluded=True
-        without pricePlan, so the line is at least active.
+        Each entry is (item_name, price_plan_external_id_or_None). Blank price
+        plan → line included but its interval is left at the book default.
         """
         url = f"{config.BASE_URL}/subscription/{ns_id}?expandSubResources=true"
         resp = self.client._request("GET", url)
@@ -483,9 +491,13 @@ class SubscriptionLoader(BaseLoader):
             for line in lines
         }
 
+        # Price intervals (where the price lives), keyed by lineNumber.
+        intervals_by_line = self._get_price_intervals_by_line(ns_id)
+
         logger.info(
             f"  Activating {len(items_to_include)} line(s) for {ext_id} "
-            f"(sub {ns_id}, plan has {len(lines)} total lines)"
+            f"(sub {ns_id}, plan has {len(lines)} total lines, "
+            f"{len(intervals_by_line)} price intervals)"
         )
 
         for item_name, pp_ext_id in items_to_include:
@@ -497,37 +509,97 @@ class SubscriptionLoader(BaseLoader):
                 )
                 continue
 
-            patch_body: dict = {"isIncluded": True}
-            pp_status = "no price plan in CSV"
-            if pp_ext_id:
-                # The CSV's `Price Plan External ID` is the raw form (no revision).
-                # Price plans were loaded with revisioned externalIds, so the
-                # state tracker is keyed on the revisioned form.
-                pp_ext_id_rev = config.apply_revision(pp_ext_id)
-                pp_ns_id = self.tracker.get_netsuite_id("pricePlan", pp_ext_id_rev)
-                if pp_ns_id:
-                    patch_body["pricePlan"] = {"id": pp_ns_id}
-                    pp_status = f"pricePlan={pp_ns_id} (extId={pp_ext_id_rev})"
-                else:
-                    pp_status = (
-                        f"pricePlan extId {pp_ext_id_rev} unresolved in state DB — "
-                        f"line activated WITHOUT pricePlan"
-                    )
-                    logger.warning(
-                        f"  ⚠ Price plan {pp_ext_id_rev} not in state tracker; "
-                        f"sub {ns_id} line {line_num} ({item_name}) will use plan default."
-                    )
-
+            # 1. Include the line.
             line_url = (
                 f"{config.BASE_URL}/subscription/{ns_id}/subscriptionLine/{line_num}"
             )
-            patch_resp = self.client._request("PATCH", line_url, patch_body)
-            if patch_resp.status_code == 204:
+            inc_resp = self.client._request("PATCH", line_url, {"isIncluded": True})
+            if inc_resp.status_code != 204:
+                logger.error(
+                    f"  ✗ Failed to include line {line_num} ({item_name}): "
+                    f"HTTP {inc_resp.status_code}: {inc_resp.text[:300]}"
+                )
+                continue
+            logger.info(f"  ✓ Line {line_num} ({item_name}) → isIncluded=True")
+
+            # 2. Set the price on the matching interval.
+            if not pp_ext_id:
                 logger.info(
-                    f"  ✓ Line {line_num} ({item_name}) → isIncluded=True | {pp_status}"
+                    f"    (no price plan in CSV for {item_name}; "
+                    f"interval left at book default)"
+                )
+                continue
+
+            # CSV `Price Plan External ID` is raw; plans were loaded revisioned.
+            pp_ext_id_rev = config.apply_revision(pp_ext_id)
+            pp_ns_id = self.tracker.get_netsuite_id("pricePlan", pp_ext_id_rev)
+            if not pp_ns_id:
+                logger.warning(
+                    f"  ⚠ Price plan {pp_ext_id_rev} not in state tracker; "
+                    f"line {line_num} ({item_name}) left at book default."
+                )
+                continue
+
+            interval = intervals_by_line.get(line_num)
+            if not interval:
+                logger.warning(
+                    f"  ⚠ No price interval for line {line_num} ({item_name}) on "
+                    f"sub {ns_id}; cannot set price. Interval lines available: "
+                    f"{sorted(intervals_by_line)}"
+                )
+                continue
+
+            interval_url = self._interval_self_url(interval, ns_id)
+            price_resp = self.client._request(
+                "PATCH", interval_url, {"pricePlan": {"id": pp_ns_id}}
+            )
+            if price_resp.status_code == 204:
+                logger.info(
+                    f"    ✓ priceInterval (line {line_num}) → pricePlan {pp_ns_id} "
+                    f"(extId={pp_ext_id_rev})"
                 )
             else:
                 logger.error(
-                    f"  ✗ Failed to activate line {line_num} ({item_name}): "
-                    f"HTTP {patch_resp.status_code}: {patch_resp.text[:300]}"
+                    f"    ✗ Failed to set price on interval (line {line_num}, "
+                    f"{item_name}): HTTP {price_resp.status_code}: "
+                    f"{price_resp.text[:300]}"
                 )
+
+    def _get_price_intervals_by_line(self, ns_id: str) -> dict[int, dict]:
+        """
+        GET the subscription's priceInterval collection, keyed by lineNumber.
+        This is the sublist that actually holds line prices (separate from
+        subscriptionLine). Returns {} on failure.
+        """
+        url = f"{config.BASE_URL}/subscription/{ns_id}/priceInterval?expandSubResources=true"
+        resp = self.client._request("GET", url)
+        if resp.status_code != 200:
+            logger.error(
+                f"  Cannot GET price intervals for sub {ns_id}: "
+                f"HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+            return {}
+        by_line: dict[int, dict] = {}
+        for iv in resp.json().get("items", []):
+            line_no = iv.get("lineNumber")
+            if line_no is not None:
+                by_line[line_no] = iv
+        return by_line
+
+    @staticmethod
+    def _interval_self_url(interval: dict, ns_id: str) -> str:
+        """
+        Resolve the PATCH URL for a price interval. Prefer NS's own self link
+        (a composite-key URL like
+        .../priceInterval/subscriptionPlanLineNumber=1,startDate=2026-05-31);
+        fall back to constructing that key from the interval fields.
+        """
+        for link in interval.get("links", []):
+            if link.get("rel") == "self" and link.get("href"):
+                return link["href"]
+        spln = interval.get("subscriptionPlanLineNumber")
+        start = interval.get("startDate")
+        return (
+            f"{config.BASE_URL}/subscription/{ns_id}/priceInterval/"
+            f"subscriptionPlanLineNumber={spln},startDate={start}"
+        )

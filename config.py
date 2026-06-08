@@ -26,11 +26,11 @@ SUITEQL_URL = (
 )
 
 # --- Data File Paths ---
-CUSTOMERS_CSV = "data/customers-v2-kleene-export-2026-05-07.csv"
-BILLING_CSV = "data/billing-accounts-kleene-export-2026-05-07.csv"
+CUSTOMERS_CSV = "data/customers-kleene-export-2026-06-02.csv"
+BILLING_CSV = "data/billing-accounts-kleene-export-2026-06-02.csv"
 SUBSCRIPTIONS_CSV = "data/subs-kleene-export-2026-05-29.csv"
 ONEOFF_CSV = "data/one-offs-kleene-export-2026-05-07.csv"
-PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-05-08.csv"
+PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-05-29.csv"
 
 # --- Load Revision ---
 # Suffix appended to every externalId (and every parent-lookup ext_id) for the
@@ -47,7 +47,7 @@ PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-05-08.csv"
 #
 # Old revisions (e.g. _rvn_01) remain in NS untouched. State DB rows for prior
 # revisions are preserved for audit; new revision rows are added alongside.
-LOAD_REVISION = "_rvn_02"
+LOAD_REVISION = "_rvn_prod_01"
 
 
 def apply_revision(raw_ext_id: str) -> str:
