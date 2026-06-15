@@ -27,10 +27,12 @@ SUITEQL_URL = (
 
 # --- Data File Paths ---
 CUSTOMERS_CSV = "data/customers-kleene-export-2026-06-02.csv"
-BILLING_CSV = "data/billing-accounts-kleene-export-2026-06-02.csv"
-SUBSCRIPTIONS_CSV = "data/subs-kleene-export-2026-05-29.csv"
+
+BILLING_CSV = "data/billing-accounts-kleene-export-2026-06-15.csv"
+PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-06-11.csv"
+SUBSCRIPTIONS_CSV = "data/subs-batch-2-kleene-export-2026-06-15.csv"
+
 ONEOFF_CSV = "data/one-offs-kleene-export-2026-05-07.csv"
-PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-05-29.csv"
 
 # --- Load Revision ---
 # Suffix appended to every externalId (and every parent-lookup ext_id) for the

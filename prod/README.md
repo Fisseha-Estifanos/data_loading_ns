@@ -87,7 +87,7 @@ python prod/prod_check.py customer --entityid C44268
 #    → id=830950
 
 # 2. Make sure the customer has a default billing+shipping address
-python prod/prod_check.py address --customer-id **830950**
+python prod/prod_check.py address --customer-id 830950
 #    If missing, add it from the customer CSV (dry-run first, then --apply):
 python prod/patch_customer_address.py --customer-id 830950 --from-csv \
     --company-name "7 LAMPS SECURITY LTD"
