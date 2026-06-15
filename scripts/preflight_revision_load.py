@@ -99,7 +99,7 @@ def main() -> int:
         "subscription",
         sub_rows,
         lambda r: r.get("External ID", "").strip(),
-        derived={"BA": lambda raw: f"{raw}_BA"},
+        derived={"BA": lambda raw: f"{raw.split('_', 1)[0]}_BA"},
     )
 
     one_rows = read_csv(config.ONEOFF_CSV)
@@ -168,7 +168,7 @@ def main() -> int:
         else:
             if not tracker.get_netsuite_id("customer", config.apply_revision(cust_raw)):
                 sub_cust_orphans["missing_in_state_db"] += 1
-        ba_rev = config.apply_revision(f"{deal}_BA")
+        ba_rev = config.apply_revision(f"{deal.split('_', 1)[0]}_BA")
         if not tracker.get_netsuite_id("billingAccount", ba_rev):
             sub_ba_orphans += 1
         pp_raw = (r.get("Price Plan External ID") or "").strip()

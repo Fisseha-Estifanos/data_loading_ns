@@ -194,9 +194,17 @@ class SubscriptionLoader(BaseLoader):
             return None
 
         # Resolve billing account (may not exist for all subscriptions).
+        # One billing account is shared across all subscriptions that split off
+        # the same deal (e.g. AG HOTELS' 498737819895_27398 and any sibling
+        # split share BA 498737819895_BA). The BA ext_id is therefore keyed on
+        # the DEAL ID — the token before the first underscore in the sub's
+        # External ID — not the full sub External ID:
+        #   498737819895_27398   → deal 498737819895 → BA 498737819895_BA
+        #   494812626113_a_27397 → deal 494812626113 → BA 494812626113_BA
         # Convention: revision is the last token, so the BA ext_id is
-        # `<raw_deal>_BA<LOAD_REVISION>` (e.g. 442541777135_BA_rvn_02).
-        billing_account_ext_id = config.apply_revision(f"{raw_ext_id}_BA")
+        # `<deal_id>_BA<LOAD_REVISION>` (e.g. 498737819895_BA_rvn_prod_01).
+        deal_id = raw_ext_id.split("_", 1)[0]
+        billing_account_ext_id = config.apply_revision(f"{deal_id}_BA")
         billing_account_ns_id = self.tracker.get_netsuite_id(
             "billingAccount", billing_account_ext_id
         )

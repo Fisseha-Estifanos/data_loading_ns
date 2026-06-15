@@ -413,7 +413,7 @@ FIELD_MAPS = {
                 "billingAccount.id",
                 "resolved",
                 "str",
-                "Looked up as {ext_id}_BA from state tracker; omitted if not found",
+                "Looked up as {deal_id}_BA (deal id = sub External ID before first '_') from state tracker; omitted if not found",
             ),
             (
                 "Subscription Plan",
