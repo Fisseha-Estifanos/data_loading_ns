@@ -288,16 +288,23 @@ def dump_subscription(client, internal_id=None, external_id=None) -> None:
           f"priceBook={pb.get('refName')!r} (id={pb.get('id')})")
     print(f"  activeTotalContractValue={sub.get('activeTotalContractValue')}  "
           f"pendingTotalContractValue={sub.get('pendingTotalContractValue')}")
+    # Price plan + recurring amount live on the priceInterval sublist, NOT on
+    # subscriptionLine (the subscriptionLine.pricePlan field is always empty).
+    # Build a lineNumber → interval map and read the real values from there.
+    intervals = sub.get("priceInterval", {}).get("items", [])
+    interval_by_line = {iv.get("lineNumber"): iv for iv in intervals}
+
     lines = sub.get("subscriptionLine", {}).get("items", [])
     print(f"  {len(lines)} line(s):")
     for ln in lines:
         item = ln.get("item", {}).get("refName")
-        pp = ln.get("pricePlan", {})
+        iv = interval_by_line.get(ln.get("lineNumber"), {})
+        pp = iv.get("pricePlan", {})
         print(
             f"    line {ln.get('lineNumber')}: item={item!r}  "
             f"isIncluded={ln.get('isIncluded')}  "
             f"qty={ln.get('quantity')}  "
-            f"recurringAmt={ln.get('recurringAmount')}  "
+            f"recurringAmt={iv.get('recurringAmount')}  "
             f"pricePlan id={pp.get('id')} {pp.get('refName', '')!r}"
         )
 
