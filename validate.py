@@ -51,9 +51,42 @@ CHECK_ENTITY = {
     5: "subscription",
     6: "subscription",
     7: "subscription",
+    7.1: "subscription",
     8: "billingAccount",
     9: "billingAccount",
     10: "billingAccount",
+}
+
+# Severity each check emits. Used so a "not evaluated" finding (missing input)
+# carries the check's native severity — you can't confirm a BLOCKER check is
+# safe if its input is absent, so that absence must itself block.
+BLOCKER_CHECKS = {1, 1.1, 2, 3, 4, 5, 8, 9}
+
+# CSV inputs each check requires to produce a meaningful result. If any are
+# missing (None from _read_csv — a bad path in config), run() skips the check
+# with ONE "(input) not evaluated" finding instead of running it against empty
+# data. Two failure modes this prevents, both seen/possible in this validator:
+#   • false-finding STORM — a check comparing present records against an empty
+#     reference set flags every record (check 7.1 did this for a missing pricing
+#     CSV; check 1 would for a missing customer CSV).
+#   • false CLEAN — a check that only ITERATES a missing CSV emits nothing and
+#     the report prints "✓ clean", hiding that it never ran (checks 9/10 vs a
+#     missing BA CSV).
+# A CSV is listed whether the check iterates it (subject) or reads it to resolve
+# references — either way an absent file makes the result meaningless.
+CHECK_REQUIRED_CSVS = {
+    1: {"subscription", "customer"},
+    1.1: {"subscription"},
+    2: {"billingAccount"},
+    3: {"subscription", "customer"},
+    4: {"subscription", "billingAccount"},
+    5: {"subscription"},
+    6: {"subscription", "billingAccount"},
+    7: {"subscription"},
+    7.1: {"subscription", "pricing"},
+    8: {"billingAccount"},
+    9: {"billingAccount"},
+    10: {"billingAccount"},
 }
 
 CHECK_TITLE = {
@@ -65,6 +98,7 @@ CHECK_TITLE = {
     5: "Active sub line Sales Item is mapped (not blank / not NOT MAPPED)",
     6: "BA <-> sub deal alignment (every deal has both)",
     7: "Sub line Price Plan External ID exists in NS",
+    7.1: "Sub line Price Plan External ID exists in the pricing CSV",
     8: "BA customer has default billing AND shipping address in NS",
     9: "BA required fields present (subsidiary_id, currency_id)",
     10: "externalId shape sanity (BA = <deal_id>_BA)",
@@ -164,6 +198,11 @@ class Validator:
     fresh Validator per run; it is not designed to be re-run.
     """
 
+    # A pricing CSV with ≥ this many times more plans than the subs reference is
+    # almost certainly the unscoped full-book dump, not a per-batch export. Kept
+    # in sync with check_pricing_coverage.UNSCOPED_RATIO.
+    UNSCOPED_RATIO = 10
+
     def __init__(self, client=None):
         """Load the CSVs and build the lookup indexes (no NetSuite calls).
 
@@ -184,6 +223,19 @@ class Validator:
         self.bas = _read_csv(config.BILLING_CSV)
         self.subs_rows = _read_csv(config.SUBSCRIPTIONS_CSV)
 
+        # Which inputs actually loaded. A CSV that _read_csv returned None for is
+        # MISSING (bad path in config) — distinct from present-but-empty ([]).
+        # The dispatch loop in run() consults this so a check whose required CSV
+        # is missing is reported as "not evaluated" rather than run against empty
+        # data (which would either falsely flag every record — check 7.1's old
+        # bug — or silently report a misleading "clean"). "pricing" is filled in
+        # run()'s prefetch, since it's only read when check 7.1 is in scope.
+        self.csv_loaded = {
+            "customer": self.customers is not None,
+            "billingAccount": self.bas is not None,
+            "subscription": self.subs_rows is not None,
+            "pricing": False,
+        }
         for label, path, rows in [
             ("customer", config.CUSTOMERS_CSV, self.customers),
             ("billingAccount", config.BILLING_CSV, self.bas),
@@ -212,6 +264,7 @@ class Validator:
         self.ns_customers: dict[str, dict] = {}  # raw extId → {id, subsidiary}
         self.ns_entityids: dict[str, dict] = {}  # C-name (entityid) → {id, companyname}
         self.ns_priceplans: set[str] = set()  # revisioned extIds that exist
+        self.pricing_csv_extids: set[str] = set()  # RAW extIds in the pricing CSV
         self.addr_billing: set[str] = set()  # customer internal ids w/ default bill
         self.addr_shipping: set[str] = set()  # customer internal ids w/ default ship
 
@@ -569,6 +622,94 @@ class Validator:
                         f"back to book default.",
                     )
 
+    def check_7_1_price_plan_csv(self):
+        """Check 7.1 (WARNING): each line's price plan exists in the pricing CSV.
+
+        Companion to check 7. Check 7 asks "is the price plan already in NS?";
+        this asks "is it in the pricing CSV (``PRICE_PLAN_EXTERNAL_ID``), i.e.
+        can it be CREATED?". Both use the RAW external id (the pricing CSV and
+        the sub column are raw; NS stores the revisioned form). Reading the two
+        together: a plan missing from NS (7) but present in the CSV (7.1 clean)
+        is resolvable — run the pricePlan load and it lands in NS. A plan missing
+        from BOTH is the real gap this surfaces: there is no source row to push,
+        so the line can only ever fall back to the book default. Blank price-plan
+        values are skipped (the line intentionally uses the book default).
+
+        Guard: when MANY referenced plans are missing AND the pricing CSV holds
+        far more plans than the subs reference, the export was almost certainly
+        generated UNSCOPED (the full price book, capped at ~20k rows) rather than
+        scoped to this batch. That is a different — and louder — problem than a
+        stray missing plan: filter_to_subs.py can't fix it (you can't filter in
+        rows that aren't there); the pricing DDL must be re-run scoped to the
+        batch. A single up-front finding says so, so the per-line warnings below
+        aren't mistaken for two dozen unrelated gaps.
+
+        Empty-file guard: a MISSING pricing CSV is handled upstream by run()'s
+        per-check input guard (this check never dispatches in that case). What
+        remains is a present-but-EMPTY pricing CSV (loaded, zero plan rows):
+        comparing referenced plans against an empty set would falsely flag ALL of
+        them. So if there are referenced plans but the CSV held none, emit ONE
+        finding and return, rather than two dozen phantom coverage gaps.
+        """
+        if not self.pricing_csv_extids and any(
+            (row.get("Price Plan External ID") or "").strip()
+            for grp in self.sub_groups.values()
+            for row in grp
+            if (row.get("Lines: Include") or "").strip() == "T"
+        ):
+            self.add(
+                7.1,
+                WARNING,
+                "(pricing CSV)",
+                f"pricing CSV {config.PRICE_PLANS_CSV!r} contains no price-plan "
+                f"rows; coverage not evaluated.",
+            )
+            return
+
+        # Collect the referenced raw plans first so we can judge coverage as a
+        # whole before emitting the per-line findings.
+        referenced = set()
+        missing = []  # (sub ext, raw_pp) for each uncovered included line
+        for ext, grp in self.sub_groups.items():
+            for row in grp:
+                if (row.get("Lines: Include") or "").strip() != "T":
+                    continue
+                raw_pp = (row.get("Price Plan External ID") or "").strip()
+                if not raw_pp:
+                    continue  # blank = book default; nothing to create
+                referenced.add(raw_pp)
+                if raw_pp not in self.pricing_csv_extids:
+                    missing.append((ext, raw_pp))
+
+        # Loud, single "looks unscoped" finding when the pricing CSV dwarfs the
+        # batch and coverage is badly incomplete. UNSCOPED_RATIO mirrors the
+        # standalone check_pricing_coverage.py gate.
+        n_have = len(self.pricing_csv_extids)
+        if (
+            referenced
+            and missing
+            and n_have >= self.UNSCOPED_RATIO * len(referenced)
+        ):
+            self.add(
+                7.1,
+                WARNING,
+                "(pricing CSV scope)",
+                f"pricing CSV holds {n_have} plans for only {len(referenced)} "
+                f"referenced by the subs ({len(missing)} uncovered) — this looks "
+                f"like an UNSCOPED bulk export (full price book, capped ~20k "
+                f"rows), not a per-batch file. filter_to_subs.py cannot recover "
+                f"missing plans; re-run the pricing DDL scoped to this batch.",
+            )
+
+        for ext, raw_pp in missing:
+            self.add(
+                7.1,
+                WARNING,
+                ext,
+                f"Price Plan {raw_pp!r} referenced by sub line but not in "
+                f"the pricing CSV; it cannot be created/pushed to NS.",
+            )
+
     def check_8_addresses(self):
         """Check 8 (BLOCKER): each BA's customer has default bill+ship addresses.
 
@@ -657,6 +798,7 @@ class Validator:
         needs_customers = any(c in active_checks for c in (1, 2, 3, 8))
         needs_entityids = 1.1 in active_checks
         needs_priceplans = 7 in active_checks
+        needs_pricing_csv = 7.1 in active_checks
         needs_addresses = 8 in active_checks
 
         if needs_customers:
@@ -700,6 +842,21 @@ class Validator:
             print(f"  · querying NS for {len(rev_pps)} price-plan externalIds…")
             self._fetch_ns_priceplans(rev_pps)
 
+        if needs_pricing_csv:
+            pricing_rows = _read_csv(config.PRICE_PLANS_CSV)
+            if pricing_rows is None:
+                print(f"  ⚠ pricing CSV not found, skipping check 7.1: "
+                      f"{config.PRICE_PLANS_CSV}")
+            else:
+                self.csv_loaded["pricing"] = True
+                self.pricing_csv_extids = {
+                    (r.get("PRICE_PLAN_EXTERNAL_ID") or "").strip()
+                    for r in pricing_rows
+                    if (r.get("PRICE_PLAN_EXTERNAL_ID") or "").strip()
+                }
+                print(f"  · read {len(self.pricing_csv_extids)} price-plan "
+                      f"externalIds from the pricing CSV…")
+
         if needs_addresses:
             cids = {c["id"] for c in self.ns_customers.values() if c.get("id")}
             print(f"  · querying NS addresses for {len(cids)} customers…")
@@ -714,11 +871,31 @@ class Validator:
             5: self.check_5_sales_item,
             6: self.check_6_deal_alignment,
             7: self.check_7_price_plan,
+            7.1: self.check_7_1_price_plan_csv,
             8: self.check_8_addresses,
             9: self.check_9_required_fields,
             10: self.check_10_extid_shape,
         }
         for n in active_checks:
+            # Missing-input guard (uniform across all checks): if a required CSV
+            # didn't load, report the check as "not evaluated" with its native
+            # severity, rather than running it against empty data.
+            missing = sorted(
+                name
+                for name in CHECK_REQUIRED_CSVS.get(n, ())
+                if not self.csv_loaded.get(name)
+            )
+            if missing:
+                sev = BLOCKER if n in BLOCKER_CHECKS else WARNING
+                names = ", ".join(missing)
+                self.add(
+                    n,
+                    sev,
+                    "(input)",
+                    f"not evaluated — required {names} CSV missing/unreadable "
+                    f"(fix the *_CSV path in config.py and re-run).",
+                )
+                continue
             dispatch[n]()
         return self.findings
 

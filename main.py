@@ -830,7 +830,22 @@ def _run(args, logger, log_file: str):
         from validate import run_validation
 
         entities = {args.entity} if args.entity else None
-        sys.exit(run_validation(entities, client=client))
+        v_code = run_validation(entities, client=client)
+
+        # Pricing coverage gate — only when subscriptions are in scope. The
+        # validator's check 7.1 reports uncovered price plans as WARNINGS (the
+        # load still proceeds); this gate FAILS the --validate run on the same
+        # condition, because an uncovered plan means the sub line silently loads
+        # against the £0 price-book default. Reads only the local CSVs (no NS
+        # calls). Its non-zero exit is OR'd into the validator's.
+        c_code = 0
+        if entities is None or "subscription" in entities:
+            from check_pricing_coverage import run_coverage_gate
+
+            print()  # separate it from the validation report above
+            c_code = run_coverage_gate()
+
+        sys.exit(v_code or c_code)
 
     tracker = StateTracker()
 
