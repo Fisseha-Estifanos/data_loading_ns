@@ -73,6 +73,18 @@ CHECK_TITLE = {
 
 @dataclass
 class Finding:
+    """One problem reported by a single check.
+
+    Attributes:
+        check:    the check number that produced it (e.g. 1, 1.1, 5). Used to
+                  group findings under their check heading in the report.
+        severity: BLOCKER or WARNING. Any BLOCKER makes the run exit non-zero.
+        ident:    the offending record's identifier — a subscription/deal
+                  `External ID`, a BA `externalId`, or a bare deal id, depending
+                  on the check. Lets the operator jump straight to the row.
+        message:  human-readable description of what's wrong and its consequence.
+    """
+
     check: int
     severity: str
     ident: str
@@ -86,7 +98,14 @@ def _env_label() -> str:
 
 
 def _read_csv(path):
-    """Read a CSV with the same encoding the loaders use. Returns [] if missing."""
+    """Read a CSV into a list of dict rows, using the loaders' encoding.
+
+    Uses utf-8-sig so a leading BOM (Snowflake/Excel exports often have one) is
+    stripped from the first column name. Returns the row list, or ``None`` if the
+    file is missing — the caller uses ``None`` to mean "skip this entity's
+    checks" and prints a warning, rather than crashing the way the old preflight
+    script did on a missing CSV. An existing-but-empty file returns ``[]``.
+    """
     try:
         with open(path, encoding="utf-8-sig") as f:
             return list(csv.DictReader(f))
@@ -95,22 +114,68 @@ def _read_csv(path):
 
 
 def _deal_id(external_id: str) -> str:
-    """Deal id = the sub External ID token before the first underscore."""
+    """Reduce any deal-scoped external id to its bare deal id.
+
+    The deal id is everything before the first underscore. This is the same rule
+    the subscription loader uses to derive the shared billing-account key, so a
+    sub `External ID` (`494812626113_a_27397`), a BA `externalId`
+    (`494812626113_BA`), and the deal itself all collapse to `494812626113`.
+    Used by checks 4 and 6 to line subscriptions and BAs up by deal.
+    """
     return external_id.split("_", 1)[0]
 
 
 def _chunk(seq, size=200):
+    """Yield successive ``size``-length slices of ``seq``.
+
+    Keeps each SuiteQL ``WHERE ... IN (...)`` list short enough to stay under
+    NetSuite's query-length limits when resolving many external ids at once.
+    """
     for i in range(0, len(seq), size):
         yield seq[i : i + size]
 
 
 def _sql_in(values):
-    """Build a SQL IN(...) list, single-quote-escaped."""
+    """Render ``values`` as a SQL ``IN (...)`` body with each item quoted.
+
+    Single quotes inside a value are escaped by doubling (`'` → `''`) so company
+    names / external ids containing apostrophes (e.g. ``AJ'S TRAINING LTD``)
+    can't break the query or be used for injection. Returns the comma-joined
+    quoted list WITHOUT the surrounding parentheses.
+    """
     return ",".join("'" + v.replace("'", "''") + "'" for v in values)
 
 
 class Validator:
+    """Runs the read-only pre-load checks and accumulates Findings.
+
+    Lifecycle:
+        1. ``__init__`` loads the three CSVs (customer / BA / subscription) and
+           builds the in-memory indexes the checks read from (the company-name →
+           External ID 2 map and the subscription groups). It does NOT touch
+           NetSuite.
+        2. ``run(entities)`` prefetches only the NS data the requested checks
+           need (one batched SuiteQL query per kind), then dispatches each check.
+        3. ``report(entities)`` prints the grouped report and returns the blocker
+           count.
+
+    All NS access is read-only SuiteQL. State lives on the instance: the CSV
+    rows, the lookup maps, and ``self.findings`` (the result list). Construct a
+    fresh Validator per run; it is not designed to be re-run.
+    """
+
     def __init__(self, client=None):
+        """Load the CSVs and build the lookup indexes (no NetSuite calls).
+
+        Args:
+            client: an optional NetSuiteClient to reuse (e.g. the one main.py
+                already built). If omitted, a new client is created. The client
+                is only USED later, in ``run()``; constructing the Validator
+                issues no queries.
+
+        Side effects: prints a one-line warning for any CSV that is missing
+        (its checks are then silently skipped rather than crashing).
+        """
         self.client = client or NetSuiteClient()
         self.findings: list[Finding] = []
 
@@ -152,6 +217,10 @@ class Validator:
 
     # ── helpers ────────────────────────────────────────────────────────
     def add(self, check, severity, ident, message):
+        """Record one problem. Thin wrapper that appends a Finding to
+        ``self.findings``; every check calls this instead of building Findings
+        inline, so the result list stays the single source of truth for the
+        report and the exit code."""
         self.findings.append(Finding(check, severity, ident, message))
 
     def resolve_customer_ext(self, raw_name: str):
@@ -170,6 +239,16 @@ class Validator:
 
     # ── NS prefetch ─────────────────────────────────────────────────────
     def _fetch_ns_customers(self, raw_ext_ids):
+        """Resolve customers in NS by their RAW External ID 2 and cache them.
+
+        Populates ``self.ns_customers`` ({externalid → {id, subsidiary}}) for
+        checks 1, 2, 3 and 8. Queried in chunks of ≤200 ids via ``WHERE
+        externalid IN (...)``. IMPORTANT: customers are looked up RAW (no
+        revision suffix) because in prod they pre-exist under their native
+        External ID 2 — see the module docstring and the `customer-extid-raw-in-
+        prod` memory note. Only ids that actually exist in NS appear in the map;
+        a missing externalid simply won't be a key.
+        """
         ids = sorted({e for e in raw_ext_ids if e})
         for chunk in _chunk(ids):
             q = (
@@ -183,9 +262,16 @@ class Validator:
                 }
 
     def _fetch_ns_entityids(self, entityids):
-        """Look up NS customers by C-name (entityid) in the ACTIVE env. This is
-        the same lookup the repo's prod_check.find_customer(entityid=...) does,
-        batched via `WHERE entityid IN (...)`."""
+        """Resolve customers by C-name (``entityid``) in the ACTIVE env and cache.
+
+        Populates ``self.ns_entityids`` ({entityid → {id, companyname}}) for
+        check 1.1. This is the same lookup the repo's
+        ``prod_check.find_customer(entityid=...)`` does, just batched via ``WHERE
+        entityid IN (...)`` in chunks of ≤200. The active env is whatever
+        ``NS_REALM`` points at (prod vs sandbox), so a C-name present in one env
+        but not the other is reported accordingly. Only existing entityids
+        become keys.
+        """
         ids = sorted({e for e in entityids if e})
         for chunk in _chunk(ids):
             q = (
@@ -199,6 +285,14 @@ class Validator:
                 }
 
     def _fetch_ns_priceplans(self, rev_ext_ids):
+        """Cache which price plans already exist in NS, for check 7.
+
+        ``rev_ext_ids`` are the REVISIONED price-plan external ids (the raw subs
+        CSV value already passed through ``config.apply_revision``). Populates
+        ``self.ns_priceplans`` with the subset that actually exist, via chunked
+        ``WHERE externalid IN (...)``. Membership is all check 7 needs, so this
+        stores a set of external ids rather than a map to internal ids.
+        """
         ids = sorted({e for e in rev_ext_ids if e})
         for chunk in _chunk(ids):
             q = (
@@ -209,6 +303,14 @@ class Validator:
                 self.ns_priceplans.add(row["externalid"])
 
     def _fetch_ns_addresses(self, customer_internal_ids):
+        """Record which customers have a default billing / shipping address.
+
+        For the given customer INTERNAL ids, queries ``customeraddressbook`` and
+        fills two sets — ``self.addr_billing`` and ``self.addr_shipping`` — with
+        the customer ids flagged ``defaultbilling='T'`` / ``defaultshipping='T'``
+        respectively. Check 8 then asks "is this customer in both sets?". A
+        customer with neither default address won't appear in either set.
+        """
         ids = sorted({i for i in customer_internal_ids if i})
         for chunk in _chunk(ids):
             q = (
@@ -225,6 +327,14 @@ class Validator:
 
     # ── checks ───────────────────────────────────────────────────────────
     def check_1_sub_customer(self):
+        """Check 1 (BLOCKER): every subscription's customer resolves to NS.
+
+        Two-stage resolution per sub group, via the customer CSV and the alias
+        map: sub ``Customer`` name → (alias) → customer-CSV ``Company Name`` →
+        ``External ID 2`` → NS. Emits a blocker if the name matches no customer
+        CSV row, or if the resolved External ID 2 isn't present in NS. This is
+        the externalId path; check 1.1 is the complementary C-name path.
+        """
         for ext, grp in self.sub_groups.items():
             name = (grp[0].get("Customer") or "").strip()
             cust_ext = self.resolve_customer_ext(name)
@@ -280,6 +390,13 @@ class Validator:
                 )
 
     def check_2_ba_customer(self):
+        """Check 2 (BLOCKER): every BA points at a real NS customer.
+
+        Each billing account's ``customer_externalId`` must match a customer in
+        NS by ``External ID 2`` (looked up raw). Blocks if the value is blank or
+        not found. Catches the warehouse bug where BAs were keyed by HubSpot ids
+        (``MP_HubSpot_...``) instead of the loaded customer External ID 2.
+        """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             cust_ext = (r.get("customer_externalId") or "").strip()
@@ -295,6 +412,14 @@ class Validator:
                 )
 
     def check_3_subsidiary(self):
+        """Check 3 (BLOCKER): sub subsidiary matches its customer's NS subsidiary.
+
+        Maps the sub's ``Subsidiary`` name through SUBSIDIARY_MAP to an NS id and
+        compares it against the customer's ``subsidiary`` as recorded in NS. A
+        mismatch is a hard NS 400 at load time. Skips subs already flagged by
+        check 1 (no resolvable customer) so each problem is reported once.
+        Catches the B&M Mchugh case (CSV sends subsidiary 12; NS customer is 13).
+        """
         for ext, grp in self.sub_groups.items():
             header = grp[0]
             name = (header.get("Customer") or "").strip()
@@ -323,6 +448,14 @@ class Validator:
                 )
 
     def check_4_startdates(self):
+        """Check 4 (BLOCKER): BA startDate is present and not after its subs.
+
+        For each deal, finds the earliest sub ``Start Date``, then for the deal's
+        BA: blocks if ``startDate`` is blank (NS would default it to today,
+        breaking any sub that starts earlier) or if it is later than the earliest
+        sub start. A BA must begin on/before the first subscription it bills.
+        Catches the Zebra blank-startDate case.
+        """
         # earliest sub Start Date per deal
         earliest = {}
         for ext, grp in self.sub_groups.items():
@@ -356,6 +489,15 @@ class Validator:
                 )
 
     def check_5_sales_item(self):
+        """Check 5 (BLOCKER): every active sub line maps to a real Sales Item.
+
+        Scans the included lines (``Lines: Include == 'T'``) of each sub group
+        and counts those whose ``Sales Item`` is blank or the literal
+        ``NOT MAPPED`` sentinel. The loader silently skips such lines, so the sub
+        would load short some items — hence a blocker for sign-off. Reports one
+        finding per sub with the counts (blank vs NOT MAPPED), not one per line,
+        to keep the report readable. Catches e.g. the unmapped EAP line.
+        """
         for ext, grp in self.sub_groups.items():
             n_blank = n_notmapped = 0
             for row in grp:
@@ -381,6 +523,16 @@ class Validator:
                 )
 
     def check_6_deal_alignment(self):
+        """Check 6 (WARNING): every deal has both a BA and a subscription.
+
+        Compares the set of deal ids seen in the subscription groups against the
+        set seen in the BA rows (both reduced via ``_deal_id`` — the token before
+        the first underscore). Warns for each deal that has subs but no BA row
+        (the sub loads with no billing-account reference) and for each deal with
+        a BA but no sub (an orphan BA). Warning, not blocker — the load can still
+        proceed. Catches the Care Shield gap. NOTE: if the BA CSV is missing
+        entirely, every sub deal trips this warning.
+        """
         sub_deals = {_deal_id(e) for e in self.sub_groups}
         ba_deals = {
             _deal_id((r.get("externalId") or "").strip()) for r in (self.bas or [])
@@ -391,6 +543,15 @@ class Validator:
             self.add(6, WARNING, d, "deal has a BA row but no subscription.")
 
     def check_7_price_plan(self):
+        """Check 7 (WARNING): each line's price plan exists in NS.
+
+        For every included line carrying a ``Price Plan External ID``, applies
+        the load revision and checks the result against the price plans found in
+        NS. A blank value is fine (the line intentionally uses the price book
+        default). A non-blank value missing from NS warns that the line will fall
+        back to the book default instead of its intended plan — informational,
+        not a blocker.
+        """
         for ext, grp in self.sub_groups.items():
             for row in grp:
                 if (row.get("Lines: Include") or "").strip() != "T":
@@ -409,6 +570,15 @@ class Validator:
                     )
 
     def check_8_addresses(self):
+        """Check 8 (BLOCKER): each BA's customer has default bill+ship addresses.
+
+        The BA loader resolves ``billAddressList`` / ``shipAddressList`` from the
+        customer's default billing and shipping addresses; if either is missing
+        the BA is skipped. So for each BA, this blocks when its NS customer lacks
+        a default billing and/or shipping address (per ``customeraddressbook``).
+        BAs whose customer wasn't found in NS are skipped here — already flagged
+        by check 2.
+        """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             cust_ext = (r.get("customer_externalId") or "").strip()
@@ -431,6 +601,12 @@ class Validator:
                 )
 
     def check_9_required_fields(self):
+        """Check 9 (BLOCKER): required BA fields are present.
+
+        Guards against silent skips by blocking any BA whose ``subsidiary_id`` or
+        ``currency_id`` is blank — both are mandatory NS references the loader
+        needs to build a valid payload.
+        """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             for field in ("subsidiary_id", "currency_id"):
@@ -438,6 +614,13 @@ class Validator:
                     self.add(9, BLOCKER, ba_ext, f"BA {field} is blank.")
 
     def check_10_extid_shape(self):
+        """Check 10 (WARNING): BA externalId follows the ``<deal_id>_BA`` shape.
+
+        Sanity-checks the naming convention by warning when a BA ``externalId``
+        doesn't end in ``_BA``. Since deal alignment (check 6) and the subscription
+        loader's shared-BA key both derive the deal id from this shape, drift
+        here would quietly misalign BAs and subs. Warning only.
+        """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             if not ba_ext.endswith("_BA"):
@@ -450,8 +633,20 @@ class Validator:
 
     # ── orchestration ─────────────────────────────────────────────────────
     def run(self, entities=None):
-        """Run checks. `entities` = iterable of entity types to validate, or
-        None for the full pipeline. Returns list[Finding]."""
+        """Prefetch the needed NS data, then run the in-scope checks.
+
+        Args:
+            entities: iterable of entity types (e.g. {"subscription"}) to scope
+                the run to only the checks guarding them (per CHECK_ENTITY), or
+                None to run the whole catalog.
+
+        Only the NS queries required by the active checks are issued — e.g. the
+        customer map is fetched only if any of checks 1/2/3/8 are in scope, the
+        C-name map only for check 1.1, etc. — each as one batched, chunked
+        SuiteQL call. Checks are then dispatched in sorted order so 1.1 runs
+        right after 1. Returns ``self.findings`` (also kept on the instance for
+        ``report``).
+        """
         active_checks = [
             n
             for n in sorted(CHECK_ENTITY)
@@ -529,6 +724,16 @@ class Validator:
 
     # ── reporting ──────────────────────────────────────────────────────────
     def report(self, entities=None):
+        """Print the grouped report and return the blocker count.
+
+        Groups ``self.findings`` by check and prints every check in scope under
+        its title with a status mark — ``✓`` clean, ``⚠`` warnings only, ``✗`` has
+        a blocker — followed by each finding. Ends with a summary line and an
+        overall RESULT (blocked vs OK-to-load). ``entities`` scopes which checks
+        are shown, matching the set passed to ``run``. Returns the number of
+        blocker findings, which the caller maps to the process exit code (>0 → 1).
+        Call after ``run``; on its own it would just print empty checks.
+        """
         active_checks = [
             n
             for n in sorted(CHECK_ENTITY)
@@ -582,6 +787,13 @@ def run_validation(entities=None, client=None) -> int:
 
 
 def main():
+    """CLI entry point for ``python validate.py``.
+
+    Parses ``--entity`` (repeatable; omit for the full pipeline), runs the
+    validation, and exits with its status code (0 clean / 1 blockers) so the
+    command can gate a shell pipeline. ``main.py --validate`` calls
+    ``run_validation`` directly instead of going through here.
+    """
     parser = argparse.ArgumentParser(description="Read-only pre-load validator.")
     parser.add_argument(
         "--entity",
