@@ -83,11 +83,27 @@ python prod/prod_check.py whoami        # prints SANDBOX or PRODUCTION + account
 # 3. Point config.py *_CSV paths at the active Snowflake exports for this batch,
 #    and set config.LOAD_REVISION (the externalId suffix; currently _rvn_prod_01).
 
+# 3b. (OPTIONAL) Trim the dependency CSVs to ONLY what this batch's subs need.
+#     The customer / pricePlan / billing exports are bulk dumps that carry far
+#     more rows than the subs reference; without trimming, the load pushes data
+#     you don't want and validate flags problems for rows the subs never touch.
+#     This rewrites each file in place (timestamped .bak saved). Subs CSV is
+#     never modified. Preview first, then apply.
+python filter_to_subs.py --dry-run     # report what would be removed; writes nothing
+python filter_to_subs.py               # apply: trim in place, back up originals
+
 # 4. VALIDATE — read-only, reports EVERY data problem at once. Run before every load.
 python main.py --validate
 #    Exits non-zero if blockers exist (name/key mismatches, subsidiary conflicts,
 #    blank/late BA start dates, unmapped sales items, missing addresses, ...).
 #    Resolve every ✗ before loading. Scope to one entity with --validate --entity <e>.
+#    When subscriptions are in scope, --validate also runs the PRICING COVERAGE
+#    GATE (below) and fails if any referenced price plan is missing from the
+#    pricing CSV. You can also run that gate on its own — no NS creds needed:
+python check_pricing_coverage.py       # PASS only if every sub-referenced plan is in the pricing CSV
+#    A FAIL here usually means the pricing export was generated UNSCOPED (the
+#    full price book, capped ~20k rows) instead of scoped to this batch's deals.
+#    filter_to_subs.py cannot fix it — re-run the pricing DDL scoped to the batch.
 
 # 5. LOAD in dependency order. Dry-run each first, then the live run.
 python main.py --dry-run --entity customer        && python main.py --entity customer

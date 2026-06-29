@@ -186,6 +186,7 @@ runnable per-entity and for the whole pipeline.
 | 5 | Every active sub line `Sales Item` is mapped (not blank / not `NOT MAPPED`) | Warn→Yes | EAP NOT MAPPED |
 | 6 | BA↔sub deal alignment: every sub deal has a BA row & vice-versa (deal_id = before first `_`) | Warn | Care Shield gap |
 | 7 | Every sub line `Price Plan External ID` exists in NS (revisioned) | Warn | book-default lines |
+| 7.1 | Every sub line `Price Plan External ID` exists in the pricing CSV (raw `PRICE_PLAN_EXTERNAL_ID`). Companion to 7: in NS (7) but not CSV = already loaded; not in NS but in CSV = pushable via pricePlan load; in neither = real gap, no source row to create. | Warn | pricing export truncated/missing the needed plan |
 | 8 | Each BA's customer has default **billing AND shipping** address in NS | Yes | BA skip-on-no-address |
 | 9 | BA `subsidiary_id` / `currency_id` present (no blank required fields) | Yes | silent-skip guard |
 | 10 | externalId shape sanity (BA = `<deal_id>_BA`, sub carries deal prefix) | Warn | convention drift |
