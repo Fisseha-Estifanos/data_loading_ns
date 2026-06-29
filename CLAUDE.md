@@ -56,74 +56,38 @@ The DDL layer in Snowflake has evolved significantly since the first round of lo
 
 ## 🔁 Load Revisions (`config.LOAD_REVISION`)
 
-Every external ID this loader POSTs ends with the suffix in
-`config.LOAD_REVISION` (currently `_rvn_02`). Bump the constant for each
-fresh re-load batch — new records land in NS with new externalIds rather
-than colliding with prior revisions. The state DB keeps rows from every
-revision side-by-side for audit; nothing is wiped.
-
-Why: NS upserts by externalId. Re-POSTing with old IDs breaks for entities
-where most fields are immutable post-creation (subscriptions especially —
-they require Subscription Change Orders, not direct PATCH).
-
-ID shapes (revision is always the LAST token):
-- customer:        `<External ID 2>_rvn_02`
-- billingAccount:  `<deal_id>_BA_rvn_02`
-- pricePlan:       `MP_PP_<line>_<slug>_rvn_02`
-- subscription:    `<deal_id>_rvn_02`
-- oneOff invoice:  `<Invoice External ID>_rvn_02`
-- EER record:      `<customer ext>_EER_rvn_02`
+> What/why, ID shapes, and the env setup live in **[README.md](README.md)**.
+> Kept here: the code-level detail needed when editing loaders.
 
 Where the suffix is applied:
-- `BaseLoader.prepare_records()` auto-suffixes the ext_id placed in the
-  records tuple AND overrides `payload["externalId"]` before POST.
-- Subscription/one-off override `prepare_records` and apply the same
-  pattern (see those files).
-- Dependent loaders (BA→customer, subs→customer/BA/price plan,
-  oneOff→customer, EER→customer) wrap parent ext_ids with
-  `config.apply_revision(...)` before consulting the state tracker.
-- Price-plan reconciliation at startup is scoped to
-  `LIKE 'MP\_PP\_%<rev>'` so prior-revision plans don't leak in.
-- Tier-3 fallback when `tier3_field == "externalId"` uses the already-
-  suffixed value from the records tuple.
 
-Pre-flight before a fresh revisioned load:
-
-    python scripts/preflight_revision_load.py
-
-Read-only. Reports per-entity counts, state-DB collisions, and parent-lookup
-orphans. Run it before bumping the revision and before kicking off
-`python main.py`.
-
-Old revisions: leave alone (current decision, 2026-05-06). Records under
-`_rvn_01` remain in NS untouched. A parked deactivation script lives at
-`scripts/deactivate/deactivate_prior_revision.py` for future use; it is
-guarded by `REVIEWED=False` and must be hand-checked per entity type before
-any apply run.
+- `BaseLoader.prepare_records()` auto-suffixes the ext_id in the records tuple
+  AND overrides `payload["externalId"]` before POST.
+- Subscription/one-off override `prepare_records` and apply the same pattern.
+- Dependent loaders (BA→customer, subs→customer/BA/price plan, oneOff→customer,
+  EER→customer) wrap parent ext_ids with `config.apply_revision(...)` before
+  consulting the state tracker.
+- Price-plan reconciliation at startup is scoped to `LIKE 'MP\_PP\_%<rev>'`.
+- Tier-3 fallback when `tier3_field == "externalId"` uses the already-suffixed
+  value from the records tuple.
+- **Prod customers are keyed RAW** (no suffix) — they pre-exist in NS. Only
+  BA / subscription / pricePlan / oneOff carry the suffix.
 
 Retrofit script note: `scripts/retrofit_subscription_pricing.py` was built
-against `_rvn_01` records and is not revision-aware. If you need to run it
-again on `_rvn_02` records, audit the matching logic first.
+against `_rvn_01` and is not revision-aware — audit matching logic before reuse.
 
 ---
 
 ## ⛔ STRICT DATA INTEGRITY RULE — DO NOT MODIFY SOURCE DATA
 
-**This loader must never silently alter, default, or invent data values.**
+**Never silently alter, default, or invent source values.** If a required field
+is missing or unmapped, **log an error and return `None` to skip the record** —
+never substitute a default (`SUBSIDIARY_MAP.get(name, "12")` is wrong — drop the
+default). No reformatting/coercion of values before sending to NS. The only
+permitted touches are `.strip()` and `"" → None`. When editing loader code, do
+not introduce new defaults or fallbacks.
 
-The CSVs are the authoritative source of truth, produced by Snowflake transformations. Any modification here — even well-intentioned — corrupts the audit trail and creates records in NetSuite that don't match the source.
-
-### What this means in practice
-
-- **No silent defaults.** If a required field (subsidiary, currency, country, etc.) is missing or unmapped, the record must **fail with a clear error** — never substitute a guessed value.
-- **No data coercion.** Do not reformat, normalise, or transform field values (e.g. phone numbers, dates, country names) before sending. Send exactly what the CSV contains.
-- **No fallback values.** `SUBSIDIARY_MAP.get(name, "12")` is wrong — the `, "12"` default must not exist. Same for currency, country, and any other lookup.
-- **Whitespace stripping (`.strip()`) is acceptable** — it's not a data change, just cleaning CSV artefacts.
-- **`or None` to drop empty strings is acceptable** — sending an empty string to NS is different from omitting the field.
-
-All known violations have been fixed. Every unmapped or blank required field now logs an error and returns `None` to skip the record — no silent defaults remain.
-
-If you are adding or editing any loader code, **do not introduce new defaults or fallbacks**. If a value can't be resolved, log an error and return `None` to skip the record.
+(Full rationale in **[README.md](README.md)**.)
 
 ---
 
@@ -169,54 +133,17 @@ netsuite_loader/
 
 ---
 
-## Load Order (Non-Negotiable Hierarchy)
+## Load Order, ID Resolution & State Tracker
 
-```
-1. Customer              → no dependencies
-2. Billing Account       → references Customer (via NS internal ID)
-3. Price Plan            → no NS dependencies (refs sales item by name only)
-4. Subscription (header) → references Customer + Billing Account + Price Plan (per line)
-   └─ Subscription Lines → nested in subscription payload as sublist
-5. One-Off Invoice       → references Customer
-```
+The load hierarchy, the 3-tier ID resolution table, and the state-DB schema all
+live in **[README.md](README.md)**. Code-relevant notes:
 
-Each step uses the **state tracker** to look up the NetSuite internal ID of its parent entity. If the parent hasn't been loaded, the child record is skipped with a logged error.
-
----
-
-## ID Resolution — 3-Tier Strategy
-
-Applied to **every entity** after a successful POST:
-
-| Tier | Method | Details |
-|------|--------|---------|
-| 1 | Parse `Location` header | `Location: .../customer/800419` → extract `800419` |
-| 2 | GET by externalId | `GET /record/v1/{type}/eid:{externalId}` |
-| 3 | SuiteQL query | `SELECT id FROM {type} WHERE {field} = '{value}'` |
-
-Status values: `success` (ID resolved), `success_no_id` (2xx but ID unresolved — needs manual review), `failed` (API error).
-
----
-
-## State Tracker (SQLite)
-
-Location: `state/load_state.db`
-
-```sql
-load_state (
-    entity_type   TEXT,     -- 'customer', 'billingAccount', 'subscription', 'oneOff', 'pricePlan'
-    external_id   TEXT,     -- your external ID
-    netsuite_id   TEXT,     -- NS internal ID (once resolved)
-    status        TEXT,     -- 'pending', 'success', 'success_no_id', 'failed'
-    error_message TEXT,     -- API error details
-    payload_hash  TEXT,     -- SHA256 of payload for change detection
-    tier_used     TEXT,     -- which tier resolved the ID
-    attempted_at  TEXT,
-    PRIMARY KEY (entity_type, external_id)
-)
-```
-
-On re-run, records with `status=success` or `success_no_id` are automatically skipped.
+- Each child resolves its parent's NS internal ID from the state tracker; if the
+  parent isn't loaded, the child is skipped with a logged error.
+- ID status values: `success`, `success_no_id` (2xx but ID unresolved — manual
+  review), `failed`.
+- State DB path is `$NS_STATE_DB` (sandbox `state/load_state.db`, prod
+  `state/load_state_prod.db`). Being removed in WS2 — see the refactor plan.
 
 ---
 
@@ -322,13 +249,9 @@ The CSVs are generated by 4 Snowflake DDLs (5 with the new pricing DDL). Key log
 
 ## Testing Approach
 
-1. `python main.py --dry-run --entity customer` — validates payloads without API calls
-2. POST a single customer manually (or modify code to load just 1) — verify the payload structure works
-3. Fix any field-level errors from the 400/422 response
-4. Once customer works: `python main.py --entity customer` to load all 68
-5. `python main.py --report` to verify all succeeded
-6. Then `python main.py --entity billingAccount`, then `pricePlan` (new), then subscription, then oneOff
-7. After each step: `python main.py --report --failures` to check
+See the standard load sequence in **[README.md](README.md)** — always
+`--validate` first, then dry-run each entity (`--dry-run`), load, and check with
+`--report --failures`.
 
 ---
 
