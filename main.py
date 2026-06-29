@@ -671,6 +671,16 @@ def main():
         help="Print the CSV column → API field mapping report for all loaders",
     )
     parser.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "Run the read-only pre-load validator (validate.py) and exit. "
+            "Reports every data problem at once (name/key mismatches, subsidiary "
+            "conflicts, bad dates, unmapped items). Exits non-zero on blockers. "
+            "Respects --entity to scope checks. Run this before every load."
+        ),
+    )
+    parser.add_argument(
         "--skip-preflight", action="store_true", help="Skip auth preflight check"
     )
     parser.add_argument(
@@ -813,6 +823,15 @@ def _run(args, logger, log_file: str):
 
     # Init components
     client = NetSuiteClient()
+
+    # ── Pre-load validator (read-only) ──────────────────────────────────
+    # Runs before any state/tracker work; NS is the source of truth here.
+    if args.validate:
+        from validate import run_validation
+
+        entities = {args.entity} if args.entity else None
+        sys.exit(run_validation(entities, client=client))
+
     tracker = StateTracker()
 
     try:

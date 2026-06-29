@@ -26,12 +26,11 @@ SUITEQL_URL = (
 )
 
 # --- Data File Paths ---
-CUSTOMERS_CSV = "data/customers-kleene-export-2026-06-02.csv"
+SUBSCRIPTIONS_CSV = "data/subs-kleene-export-2026-06-29.csv"
+CUSTOMERS_CSV = "data/customers-kleene-export-2026-06-29.csv"
 
 BILLING_CSV = "data/billing-accounts-kleene-export-2026-06-15-remapped.csv"
 PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-06-11.csv"
-SUBSCRIPTIONS_CSV = "data/subs-kleene-export-2026-06-15.csv"
-
 ONEOFF_CSV = "data/one-offs-kleene-export-2026-05-07.csv"
 
 # --- Load Revision ---
@@ -57,6 +56,21 @@ def apply_revision(raw_ext_id: str) -> str:
     if not raw_ext_id:
         return raw_ext_id
     return f"{raw_ext_id}{LOAD_REVISION}"
+
+
+# --- Customer Name Aliases ---
+# The subscription / billing CSVs spell some customer names differently from the
+# loaded NS customer `Company Name`. This is a REVIEWED mapping (not a silent
+# guess): each key is a source spelling seen in a sub/BA `Customer` column, the
+# value is the canonical customer-CSV `Company Name` it resolves to. Matching is
+# case-insensitive. Used by validate.py (checks 1 & 2) and — once WS2 lands — by
+# the loaders' customer-name resolution. Add an entry only after confirming the
+# two names are genuinely the same customer.
+CUSTOMER_NAME_ALIASES = {
+    "B.& M.MCHUGH LIMITED": "B&M Mchugh Limited",
+    "FOREST HEALTHCARE LTD": "Forest Healthcare Limited",
+    "NATIONAL ASSOCIATION OF HEADTEACHERS": "Naht",
+}
 
 
 # --- State Tracking ---

@@ -3,7 +3,21 @@
 > **Purpose of this doc:** a complete, self-contained brief so this work can be started in a
 > **fresh session** with no prior context. Read this top-to-bottom and you have everything.
 >
-> **Status:** PLANNED — not started. Created 2026-06-16.
+> **Status:** WS1 SHIPPED (2026-06-16) · WS2 not started. Created 2026-06-16.
+>
+> **WS1 progress (2026-06-16):** §8 decisions all settled (see §8). `validate.py` built and run
+> against the active CSVs (`subs-…-06-15`, `billing-…-06-15-remapped`, `customers-…-06-02`). It
+> correctly flags the known issues — B&M Mchugh subsidiary 12-vs-13 (check 3), VARIOUS EATERIES
+> `MP_HubSpot_6633106143` not in NS (checks 1 & 2), and 4 NOT MAPPED sub lines (check 5) — and passes
+> the clean checks (4/6/7/8/9/10). `--validate` wired into `main.py` (respects `--entity`, exits
+> non-zero on blockers). `config.CUSTOMER_NAME_ALIASES` added (seeded with the trio).
+>
+> **⚠ Landmine found for WS2 (must fix in NSIndex):** in prod, CUSTOMERS live under their **RAW**
+> `External ID 2` (NO `_rvn_prod_01` suffix) — they pre-exist in NS; `seed_state.py` bridged this by
+> seeding the state DB under the revisioned key. Only BA/sub/pricePlan/oneOff carry the suffix.
+> §3.1's "all carry the revision suffix" is FALSE for customers. NSIndex MUST query `customer` by raw
+> externalId even though callers pass the revisioned key. Querying customers by `<ext>_rvn_prod_01`
+> returns zero rows. `validate.py` already resolves customers raw — copy that behaviour into NSIndex.
 > **Owner:** Fisseha (Kleene) · NetSuite loader for MoorePay (HubSpot→NetSuite migration).
 
 ---
@@ -165,6 +179,7 @@ runnable per-entity and for the whole pipeline.
 | # | Check | Blocker? | Catches |
 |---|---|---|---|
 | 1 | Every sub `Customer` resolves to a loaded NS customer (with alias map) | Yes | name mismatch trio |
+| 1.1 | Sub customer exists in the ACTIVE NS env by C-name (`entityid`). Subs CSV carries two C-names — `NETSUITE_ACCOUNT_NUMBER` (deal/customer level) and `NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL` (company/parent level). Try the first; if it resolves, that suffices; else try the second; else "no client found". | Yes | customer present in env but not in customers CSV / under a different externalId |
 | 2 | Every BA `customer_externalId` matches a customer in NS by `External ID 2` | Yes | HubSpot-ID key bug |
 | 3 | Each sub's `subsidiary` == its customer's NS subsidiary (`customersubsidiaryrelationship`) | Yes | B&M Mchugh 12-vs-13 |
 | 4 | For each deal: BA `startDate` ≤ earliest sub `Start Date` (and BA startDate not blank) | Yes | Zebra blank-date |
@@ -180,10 +195,28 @@ runnable per-entity and for the whole pipeline.
 - Address check reuses the `customeraddressbook` query already in `billing_account.py`.
 
 ### 4.3 Deliverables
-- `validate.py` with the 10 checks, grouped report, exit codes.
-- `--validate` wired into `main.py` (per `--entity` and all).
-- Replace/retire `scripts/preflight_revision_load.py` (fold its collision/orphan logic in; fix the
-  hard crash when `ONEOFF_CSV` file is missing — guard missing CSVs).
+- ✅ `validate.py` with the 10 checks, grouped report, exit codes. **DONE 2026-06-16.**
+- ✅ `--validate` wired into `main.py` (per `--entity` and all). **DONE.**
+- ⬜ Replace/retire `scripts/preflight_revision_load.py` (fold its collision/orphan logic in; fix the
+  hard crash when `ONEOFF_CSV` file is missing — guard missing CSVs). **Still TODO** — `validate.py`
+  guards missing CSVs (returns None + warns) and doesn't read the one-off CSV, so it no longer
+  crashes, but the old preflight script is not yet retired/folded in.
+
+**Implementation notes (as built):**
+
+- Checks 4, 5, 6, 9, 10 are pure-CSV; checks 1, 2, 3, 7, 8 hit NS read-only via chunked
+  `WHERE externalid IN (...)` SuiteQL (≤200/chunk).
+- Check 1.1 (added 2026-06-29) confirms the customer in the ACTIVE env (per `NS_REALM`) by C-name
+  via `WHERE entityid IN (...)` — the same lookup as `prod_check.find_customer(entityid=...)`, batched.
+  It tries `NETSUITE_ACCOUNT_NUMBER` then `NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL` (both subs-CSV
+  columns). It's keyed in code as the float `1.1` so it sorts/report-orders right after check 1.
+- Customer subsidiary (check 3) read from the `customer.subsidiary` SuiteQL column directly (verified
+  it agrees with `customersubsidiaryrelationship`).
+- Customer resolution is RAW (see landmine above). Price-plan check applies `config.apply_revision()`
+  to the raw `Price Plan External ID` before the NS lookup (mirrors the loader).
+- `SUBSIDIARY_MAP` is imported from `loaders.subscription` so it can't drift.
+- No checks are currently mapped to `customer`/`pricePlan`/`oneOff` entities, so `--validate --entity
+  pricePlan` exits 0 (nothing to check). The catalog is BA+subscription cross-checks.
 
 ---
 
@@ -245,15 +278,17 @@ runnable per-entity and for the whole pipeline.
 
 ---
 
-## 8. Open decisions to settle at the start of the session
-1. **`LOAD_REVISION` future:** freeze at `_rvn_prod_01`, or keep bumping per batch? (Affects whether
-   reconciliation uses `IN(...)` of exact IDs vs `LIKE '%<rev>'`.) — *Recommendation: keep the
-   suffix, query by exact externalId sets, only bump for a deliberate new generation.*
-2. **Validator strictness on check 5/6/7** (warning vs blocker) — *Recommendation: 5 blocker, 6/7
-   warning.*
-3. **Ship WS1 standalone first** (its own NS queries) or **wait for NSIndex** and build on it. —
-   *Recommendation: ship WS1 first with its own light queries; refactor onto NSIndex in WS2 Phase B.*
-4. **Keep `NS_STATE_DB` env** as deprecated no-op for one release, or remove outright?
+## 8. Open decisions — SETTLED 2026-06-16
+
+1. **`LOAD_REVISION` future:** ✅ **DECIDED — keep the suffix, freeze at `_rvn_prod_01`.** Query NS
+   by exact externalId sets (chunked `IN(...)`) derived from the CSVs; only bump for a deliberate new
+   generation. Reconciliation is precise, not `LIKE`-pattern-based (price plans keep their existing
+   `LIKE` reconciliation as that already works).
+2. **Validator strictness on check 5/6/7:** ✅ **DECIDED — check 5 BLOCKER, checks 6 & 7 WARNING.**
+3. **Ship WS1 standalone first** or wait for NSIndex: ✅ **DECIDED — ship WS1 standalone now** with
+   its own light read-only SuiteQL queries; refactor onto NSIndex in WS2 Phase B.
+4. **`NS_STATE_DB` env:** ✅ **DECIDED — keep as deprecated no-op for one release** (read but ignore,
+   log a one-line deprecation warning), remove in a later release.
 
 ---
 
@@ -270,7 +305,7 @@ runnable per-entity and for the whole pipeline.
 ---
 
 ## 10. Definition of done
-- [ ] `validate.py` exists; `--validate` runs all 10 checks, exits non-zero on blockers, used before loads.
+- [x] `validate.py` exists; `--validate` runs all 10 checks, exits non-zero on blockers, used before loads. **(2026-06-16)**
 - [ ] `ns_index.py` exists; all parent resolution + skip logic goes through it.
 - [ ] No code imports `StateTracker`; `state_tracker.py` deleted; `prod/seed_state.py` retired.
 - [ ] `--report`/`--failures` rebuilt from live NS + results CSV.
