@@ -225,10 +225,15 @@ python create_billing_accounts.py --apply    # POST them
 
 ```bash
 # Price plans, subscriptions, one-offs
-python main.py --dry-run --entity pricePlan && python main.py --entity pricePlan
-python main.py --entity subscription          # includes lines AND prices the interval
-python main.py --entity oneOff
+python main.py --dry-run --entity pricePlan    && python main.py --entity pricePlan
+python main.py --dry-run --entity subscription && python main.py --entity subscription
+python main.py --dry-run --entity oneOff       && python main.py --entity oneOff
 ```
+
+> `--dry-run` works for **every** entity (it builds and logs the payloads, no API
+> calls). For subscriptions it previews the **header** payloads only; the live run
+> additionally activates each line and repoints its price interval at the loaded
+> price plan (see gotcha #5) — those steps don't appear in the dry-run.
 
 ### Step 9 — Verify
 
