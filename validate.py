@@ -89,6 +89,25 @@ CHECK_REQUIRED_CSVS = {
     10: {"billingAccount"},
 }
 
+# Major group each check belongs to, in dispatch (sorted) order. The report
+# prints a "++++" divider with the group name the first time a check from a new
+# group appears, so the output can be skimmed by eye. Checks run 1, 1.1, 2, 3,
+# 4, 5, 6, 7, 7.1, 8, 9, 10 — themes interleave by number, which is intentional.
+CHECK_GROUP = {
+    1: "CUSTOMERS — subscription resolves to an NS customer",
+    1.1: "CUSTOMERS — subscription resolves to an NS customer",
+    2: "BILLING ACCOUNTS — customer link",
+    3: "SUBSCRIPTIONS — subsidiary match",
+    4: "BILLING ACCOUNTS — start dates",
+    5: "SUBSCRIPTIONS — sales items",
+    6: "BILLING ACCOUNTS ↔ SUBSCRIPTIONS — deal alignment",
+    7: "PRICE PLANS — coverage (NS + pricing CSV)",
+    7.1: "PRICE PLANS — coverage (NS + pricing CSV)",
+    8: "BILLING ACCOUNTS — addresses & required fields",
+    9: "BILLING ACCOUNTS — addresses & required fields",
+    10: "BILLING ACCOUNTS — addresses & required fields",
+}
+
 CHECK_TITLE = {
     1: "Sub Customer resolves to a loaded NS customer",
     1.1: "Sub customer exists in the active NS env by C-name (entityid)",
@@ -413,10 +432,21 @@ class Validator:
         C-name (entityid), independent of the externalId path in check 1. The
         subs CSV carries two C-names: NETSUITE_ACCOUNT_NUMBER (deal/customer
         level) and NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL (company/parent level).
-        Try the first; if it resolves, that suffices. Else try the second. If
-        neither resolves, report no client found."""
+        Try the first; if it resolves, that suffices. Else try the second.
+
+        Two distinct failure modes, two severities:
+          • both C-names BLANK → WARNING. The subs export simply carries no
+            C-number for this deal, so this C-name cross-check can't run — but
+            that's a gap in the subs data, NOT evidence the customer is absent
+            from NS. Check 1's External ID 2 path remains the authoritative
+            resolution. The customer NAME is included so the operator can eyeball
+            whether it's also missing from the customers CSV.
+          • a C-name IS present but not found in NS → BLOCKER. Here we have a
+            concrete C-number that doesn't exist in the active env — a real
+            "customer not in this NS account" problem."""
         env = _env_label()
         for ext, grp in self.sub_groups.items():
+            name = (grp[0].get("Customer") or "").strip()
             acct = self._group_value(grp, "NETSUITE_ACCOUNT_NUMBER")
             acct_co = self._group_value(grp, "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
             if acct and acct in self.ns_entityids:
@@ -427,19 +457,20 @@ class Validator:
             if not tried:
                 self.add(
                     1.1,
-                    BLOCKER,
+                    WARNING,
                     ext,
-                    f"no C-name in subs data (NETSUITE_ACCOUNT_NUMBER and "
-                    f"_COMPANY_LEVEL both blank); cannot confirm customer "
-                    f"in {env}.",
+                    f"customer {name!r}: no C-name in subs data "
+                    f"(NETSUITE_ACCOUNT_NUMBER and _COMPANY_LEVEL both blank); "
+                    f"cannot confirm in {env} via C-name. Check 1 (External ID 2 "
+                    f"path) still applies — verify {name!r} in the customers CSV.",
                 )
             else:
                 self.add(
                     1.1,
                     BLOCKER,
                     ext,
-                    f"customer C-name(s) {', '.join(tried)} not found in "
-                    f"{env} NS by entityid.",
+                    f"customer {name!r}: C-name(s) {', '.join(tried)} not found "
+                    f"in {env} NS by entityid.",
                 )
 
     def check_2_ba_customer(self):
@@ -928,10 +959,19 @@ class Validator:
         print("=" * 72)
 
         n_block = n_warn = 0
+        current_group = None
         for n in active_checks:
+            # Print a "++++" divider whenever we enter a new major group, so the
+            # report is skimmable by eye.
+            group = CHECK_GROUP.get(n)
+            if group != current_group:
+                print(f"\n{'+' * 72}")
+                print(f"++++ {group}")
+                print("+" * 72)
+                current_group = group
             items = by_check.get(n, [])
             if items:
-                sev = items[0].severity  # checks are single-severity
+                # A check may emit mixed severities (e.g. 1.1): blocker wins.
                 mark = "✗" if any(i.severity == BLOCKER for i in items) else "⚠"
             else:
                 mark = "✓"

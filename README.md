@@ -69,6 +69,17 @@ Run from the repo root. This is the canonical hierarchy — the same in both
 environments. The **only** change between sandbox and prod is which env file you
 source in step 1 (plus the prod extras in [§ Sandbox vs Prod](#sandbox-vs-prod)).
 
+**Pricing prep — canonical order** (when the Snowflake exports are bulk dumps):
+
+```text
+proper batch-scoped pricing CSV  →  filter_to_subs.py  →  dedup_price_plans.py  →  main.py --validate  →  load
+```
+
+Each arrow maps to a step below (3 → 3b → 3c → 4 → 5). The order matters:
+`filter_to_subs.py` trims every dependency CSV down to this batch first; then
+`dedup_price_plans.py` collapses what remains by pricing shape; then `--validate`
+(incl. the pricing-coverage gate) must pass before you load.
+
 ```bash
 cd data_loading
 
@@ -91,6 +102,19 @@ python prod/prod_check.py whoami        # prints SANDBOX or PRODUCTION + account
 #     never modified. Preview first, then apply.
 python filter_to_subs.py --dry-run     # report what would be removed; writes nothing
 python filter_to_subs.py               # apply: trim in place, back up originals
+
+# 3c. (OPTIONAL, interim) De-duplicate price plans by pricing shape. A NS price
+#     plan has no item binding — plans with identical currency/type/tiers/min/max
+#     are the same plan; the item slug in the externalId is just a name. The full
+#     price book is ~6.7x duplicated (e.g. 20k rows → ~3k distinct). This collapses
+#     the pricing CSV to one row per distinct shape (item-free externalId
+#     MP_PP_<hash>) and re-points the subs' `Price Plan External ID` to match.
+#     Rewrites both files in place (.bak saved); idempotent. Inspect first:
+python analyze_priceplan_dedup.py --full   # report duplication (read-only, no creds)
+python dedup_price_plans.py --dry-run      # report what the rewrite would change
+python dedup_price_plans.py                # apply: dedupe pricing + remap subs refs
+#     NOTE: this is the "from here" stopgap; the proper fix moves the same shape
+#     hashing into the pricing + subs DDLs (and the loaders).
 
 # 4. VALIDATE — read-only, reports EVERY data problem at once. Run before every load.
 python main.py --validate
