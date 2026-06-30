@@ -41,6 +41,13 @@ from loaders.subscription import SUBSIDIARY_MAP as SUB_SUBSIDIARY_MAP
 BLOCKER = "BLOCKER"
 WARNING = "WARNING"
 
+# The customer CSV carries the NetSuite C-number (entityid) in this oddly-named
+# column. The CSV's "External ID 2" holds a HubSpot id (MP_HubSpot_*) that does
+# NOT exist in NetSuite — confirmed by GET: 0/14 found by externalId, 10/10
+# found by entityid. So the C-number is the authoritative key to resolve a
+# customer to its NS record, used everywhere in this validator.
+CUSTOMER_CNUM_COL = "n/a 2"
+
 # Each check → which entity load it guards. Used to filter when --entity given.
 CHECK_ENTITY = {
     1: "subscription",
@@ -109,9 +116,9 @@ CHECK_GROUP = {
 }
 
 CHECK_TITLE = {
-    1: "Sub Customer resolves to a loaded NS customer",
-    1.1: "Sub customer exists in the active NS env by C-name (entityid)",
-    2: "BA customer_externalId matches an NS customer (External ID 2)",
+    1: "Sub customer resolves to an NS customer (by C-number)",
+    1.1: "Sub customer's C-number is in the subs export AND exists in NS",
+    2: "BA customer resolves to an NS customer (by C-number via customer CSV)",
     3: "Sub subsidiary == its customer's NS subsidiary",
     4: "BA startDate present and <= earliest sub Start Date for the deal",
     5: "Active sub line Sales Item is mapped (not blank / not NOT MAPPED)",
@@ -264,13 +271,30 @@ class Validator:
                 # Guard against the preflight's hard crash on a missing CSV.
                 print(f"  ⚠ {label} CSV not found, skipping its checks: {path}")
 
-        # customer-CSV Company Name (UPPER) → External ID 2
+        # Customer-CSV bridges. The C-number (CUSTOMER_CNUM_COL) is the key that
+        # actually resolves to NS; the other maps exist to *reach* it from a name
+        # (subs) or from an External ID 2 / MP_HubSpot id (billing accounts).
+        #   name_to_ext   : Company Name (UPPER) → External ID 2 (for messages /
+        #                   "is this name even in the customer CSV?")
+        #   name_to_cnum  : Company Name (UPPER) → C-number  (resolve subs)
+        #   ext2_to_cnum  : External ID 2        → C-number  (resolve BAs, which
+        #                   only carry customer_externalId = MP_HubSpot_*)
+        # ext2_to_cnum maps every row that has an External ID 2, even when its
+        # C-number is blank, so a check can tell "no customer-CSV row" (key
+        # absent) apart from "row exists but has no C-number" (value "").
         self.name_to_ext = {}
+        self.name_to_cnum = {}
+        self.ext2_to_cnum = {}
         for r in self.customers or []:
             nm = (r.get("Company Name") or "").strip().upper()
             ext = (r.get("External ID 2") or "").strip()
+            cnum = (r.get(CUSTOMER_CNUM_COL) or "").strip()
             if nm and ext:
                 self.name_to_ext[nm] = ext
+            if nm:
+                self.name_to_cnum[nm] = cnum
+            if ext:
+                self.ext2_to_cnum[ext] = cnum
 
         # Group subs by deal external id (matches subscription loader grouping)
         self.sub_groups = defaultdict(list)
@@ -280,8 +304,10 @@ class Validator:
                 self.sub_groups[ext].append(r)
 
         # --- NS lookups (populated lazily in run()) ---------------------
-        self.ns_customers: dict[str, dict] = {}  # raw extId → {id, subsidiary}
-        self.ns_entityids: dict[str, dict] = {}  # C-name (entityid) → {id, companyname}
+        # Single customer map, keyed by C-number (entityid) — the authoritative
+        # join to NS. Holds {id, subsidiary, externalid, companyname}. Used by
+        # checks 1, 1.1, 2, 3 and 8.
+        self.ns_by_cnum: dict[str, dict] = {}
         self.ns_priceplans: set[str] = set()  # revisioned extIds that exist
         self.pricing_csv_extids: set[str] = set()  # RAW extIds in the pricing CSV
         self.addr_billing: set[str] = set()  # customer internal ids w/ default bill
@@ -296,10 +322,40 @@ class Validator:
         self.findings.append(Finding(check, severity, ident, message))
 
     def resolve_customer_ext(self, raw_name: str):
-        """sub/BA Customer name → canonical (via alias map) → External ID 2."""
+        """sub/BA Customer name → canonical (via alias map) → External ID 2.
+
+        Retained only for messages / "is this name in the customer CSV at all?"
+        — NOT for NS resolution (External ID 2 is a HubSpot id absent from NS).
+        Returns None if the name matches no customer-CSV row.
+        """
         name = (raw_name or "").strip()
         canonical = config.CUSTOMER_NAME_ALIASES.get(name.upper(), name)
         return self.name_to_ext.get(canonical.upper())
+
+    def name_cnum(self, raw_name: str) -> str:
+        """sub/BA Customer name → canonical (alias map) → C-number, or ''.
+
+        Returns '' when the name matches no customer-CSV row, or matches a row
+        whose C-number column is blank — callers that need to tell those apart
+        check ``resolve_customer_ext`` (None = no row) separately.
+        """
+        name = (raw_name or "").strip()
+        canonical = config.CUSTOMER_NAME_ALIASES.get(name.upper(), name)
+        return self.name_to_cnum.get(canonical.upper(), "")
+
+    def sub_cnum(self, grp) -> str:
+        """C-number for a subscription group, best source first.
+
+        Prefer the deal-level C-number carried in the subs export
+        (NETSUITE_ACCOUNT_NUMBER, then NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL);
+        fall back to the customer CSV's C-number resolved by Customer name. ''
+        if none of those yields a C-number.
+        """
+        return (
+            self._group_value(grp, "NETSUITE_ACCOUNT_NUMBER")
+            or self._group_value(grp, "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
+            or self.name_cnum(grp[0].get("Customer"))
+        )
 
     @staticmethod
     def _group_value(grp, col: str) -> str:
@@ -310,49 +366,28 @@ class Validator:
         )
 
     # ── NS prefetch ─────────────────────────────────────────────────────
-    def _fetch_ns_customers(self, raw_ext_ids):
-        """Resolve customers in NS by their RAW External ID 2 and cache them.
+    def _fetch_ns_by_cnum(self, cnums):
+        """Resolve customers in NS by their C-number (``entityid``) and cache them.
 
-        Populates ``self.ns_customers`` ({externalid → {id, subsidiary}}) for
-        checks 1, 2, 3 and 8. Queried in chunks of ≤200 ids via ``WHERE
-        externalid IN (...)``. IMPORTANT: customers are looked up RAW (no
-        revision suffix) because in prod they pre-exist under their native
-        External ID 2 — see the module docstring and the `customer-extid-raw-in-
-        prod` memory note. Only ids that actually exist in NS appear in the map;
-        a missing externalid simply won't be a key.
+        Populates ``self.ns_by_cnum`` ({entityid → {id, subsidiary, externalid,
+        companyname}}) — the one customer map every customer-touching check
+        (1, 1.1, 2, 3, 8) reads from. Queried in chunks of ≤200 via ``WHERE
+        entityid IN (...)``. The C-number is env-agnostic and is what actually
+        exists in NS (the customer CSV's External ID 2 holds a HubSpot id that
+        does not — see CUSTOMER_CNUM_COL). Only C-numbers that exist in the
+        active env become keys; a missing one simply won't be present.
         """
-        ids = sorted({e for e in raw_ext_ids if e})
+        ids = sorted({c for c in cnums if c})
         for chunk in _chunk(ids):
             q = (
-                "SELECT id, externalid, subsidiary FROM customer "
-                f"WHERE externalid IN ({_sql_in(chunk)})"
+                "SELECT id, entityid, subsidiary, externalid, companyname "
+                f"FROM customer WHERE entityid IN ({_sql_in(chunk)})"
             )
             for row in self.client.suiteql_query(q):
-                self.ns_customers[row["externalid"]] = {
+                self.ns_by_cnum[row["entityid"]] = {
                     "id": row.get("id"),
                     "subsidiary": row.get("subsidiary"),
-                }
-
-    def _fetch_ns_entityids(self, entityids):
-        """Resolve customers by C-name (``entityid``) in the ACTIVE env and cache.
-
-        Populates ``self.ns_entityids`` ({entityid → {id, companyname}}) for
-        check 1.1. This is the same lookup the repo's
-        ``prod_check.find_customer(entityid=...)`` does, just batched via ``WHERE
-        entityid IN (...)`` in chunks of ≤200. The active env is whatever
-        ``NS_REALM`` points at (prod vs sandbox), so a C-name present in one env
-        but not the other is reported accordingly. Only existing entityids
-        become keys.
-        """
-        ids = sorted({e for e in entityids if e})
-        for chunk in _chunk(ids):
-            q = (
-                "SELECT id, entityid, companyname FROM customer "
-                f"WHERE entityid IN ({_sql_in(chunk)})"
-            )
-            for row in self.client.suiteql_query(q):
-                self.ns_entityids[row["entityid"]] = {
-                    "id": row.get("id"),
+                    "externalid": row.get("externalid"),
                     "companyname": row.get("companyname"),
                 }
 
@@ -399,59 +434,72 @@ class Validator:
 
     # ── checks ───────────────────────────────────────────────────────────
     def check_1_sub_customer(self):
-        """Check 1 (BLOCKER): every subscription's customer resolves to NS.
+        """Check 1: every subscription's customer resolves to NS by C-number.
 
-        Two-stage resolution per sub group, via the customer CSV and the alias
-        map: sub ``Customer`` name → (alias) → customer-CSV ``Company Name`` →
-        ``External ID 2`` → NS. Emits a blocker if the name matches no customer
-        CSV row, or if the resolved External ID 2 isn't present in NS. This is
-        the externalId path; check 1.1 is the complementary C-name path.
+        Resolution per sub group: ``sub_cnum`` (subs NETSUITE_ACCOUNT_NUMBER /
+        _COMPANY_LEVEL, else the customer CSV's C-number by name) → look the
+        C-number up in NS by entityid. The customer CSV's External ID 2 is a
+        HubSpot id absent from NS, so it is NOT used to resolve (see
+        CUSTOMER_CNUM_COL).
+
+        Severities:
+          • C-number present but not in NS → BLOCKER (a concrete id that should
+            exist but doesn't — the sub can't attach to a customer).
+          • no C-number anywhere → WARNING (the customer is unresolvable from the
+            data we have; the sub will be skipped). Names the customer so it can
+            be eyeballed against the customers CSV. Not a hard blocker — mirrors
+            the check 1.1 blank-C-name policy.
         """
         for ext, grp in self.sub_groups.items():
             name = (grp[0].get("Customer") or "").strip()
-            cust_ext = self.resolve_customer_ext(name)
-            if not cust_ext:
-                self.add(
-                    1,
-                    BLOCKER,
-                    ext,
-                    f"sub Customer {name!r} has no matching customer-CSV "
-                    f"row (after alias map).",
+            cnum = self.sub_cnum(grp)
+            if not cnum:
+                in_csv = self.resolve_customer_ext(name) is not None
+                why = (
+                    f"no C-number in subs data and customer-CSV "
+                    f"{CUSTOMER_CNUM_COL!r} is blank"
+                    if in_csv
+                    else "no C-number in subs data and no customer-CSV row"
                 )
-            elif cust_ext not in self.ns_customers:
+                self.add(
+                    1,
+                    WARNING,
+                    ext,
+                    f"customer {name!r}: {why}; cannot resolve to an NS customer "
+                    f"— sub would be skipped. Verify {name!r} manually.",
+                )
+            elif cnum not in self.ns_by_cnum:
                 self.add(
                     1,
                     BLOCKER,
                     ext,
-                    f"sub Customer {name!r} → External ID 2 {cust_ext!r} "
-                    f"not found in NS.",
+                    f"customer {name!r}: C-number {cnum} not found in NS.",
                 )
 
     def check_1_1_customer_in_env(self):
-        """Confirm the sub's customer actually exists in the ACTIVE NS env by its
-        C-name (entityid), independent of the externalId path in check 1. The
-        subs CSV carries two C-names: NETSUITE_ACCOUNT_NUMBER (deal/customer
-        level) and NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL (company/parent level).
-        Try the first; if it resolves, that suffices. Else try the second.
+        """Confirm the customer exists in the ACTIVE env using the C-number the
+        SUBS EXPORT itself carries — the deal-level data-completeness companion
+        to check 1. The subs CSV carries two C-numbers: NETSUITE_ACCOUNT_NUMBER
+        (deal/customer level) and NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL
+        (company/parent level). Try the first; if it resolves, that suffices.
+        Else try the second.
 
-        Two distinct failure modes, two severities:
-          • both C-names BLANK → WARNING. The subs export simply carries no
-            C-number for this deal, so this C-name cross-check can't run — but
-            that's a gap in the subs data, NOT evidence the customer is absent
-            from NS. Check 1's External ID 2 path remains the authoritative
-            resolution. The customer NAME is included so the operator can eyeball
-            whether it's also missing from the customers CSV.
-          • a C-name IS present but not found in NS → BLOCKER. Here we have a
-            concrete C-number that doesn't exist in the active env — a real
-            "customer not in this NS account" problem."""
+        Unlike check 1, this does NOT fall back to the customer CSV — it answers
+        specifically "does the subs export stand on its own?". So:
+          • both C-numbers BLANK → WARNING. The subs export carries no C-number
+            for this deal (check 1 may still resolve it via the customer CSV).
+            Names the customer so it can be eyeballed against the customers CSV.
+          • a C-number IS present but not found in NS → BLOCKER. A concrete id
+            that doesn't exist in the active env — a real "customer not in this
+            NS account" problem."""
         env = _env_label()
         for ext, grp in self.sub_groups.items():
             name = (grp[0].get("Customer") or "").strip()
             acct = self._group_value(grp, "NETSUITE_ACCOUNT_NUMBER")
             acct_co = self._group_value(grp, "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
-            if acct and acct in self.ns_entityids:
+            if acct and acct in self.ns_by_cnum:
                 continue  # found at customer level — suffices
-            if acct_co and acct_co in self.ns_entityids:
+            if acct_co and acct_co in self.ns_by_cnum:
                 continue  # found at company level
             tried = [v for v in (acct, acct_co) if v]
             if not tried:
@@ -459,10 +507,11 @@ class Validator:
                     1.1,
                     WARNING,
                     ext,
-                    f"customer {name!r}: no C-name in subs data "
+                    f"customer {name!r}: no C-number in subs data "
                     f"(NETSUITE_ACCOUNT_NUMBER and _COMPANY_LEVEL both blank); "
-                    f"cannot confirm in {env} via C-name. Check 1 (External ID 2 "
-                    f"path) still applies — verify {name!r} in the customers CSV.",
+                    f"cannot confirm in {env} from the subs export alone. Check 1 "
+                    f"may still resolve it via the customers CSV — verify {name!r} "
+                    f"there.",
                 )
             else:
                 self.add(
@@ -476,23 +525,42 @@ class Validator:
     def check_2_ba_customer(self):
         """Check 2 (BLOCKER): every BA points at a real NS customer.
 
-        Each billing account's ``customer_externalId`` must match a customer in
-        NS by ``External ID 2`` (looked up raw). Blocks if the value is blank or
-        not found. Catches the warehouse bug where BAs were keyed by HubSpot ids
-        (``MP_HubSpot_...``) instead of the loaded customer External ID 2.
+        The billing CSV carries only ``customer_externalId`` (an MP_HubSpot id,
+        absent from NS), so resolution bridges through the customer CSV:
+        customer_externalId → External ID 2 row → its C-number → NS by entityid.
+        Blocks if: the value is blank; it matches no customer-CSV row; the row
+        has no C-number; or the C-number isn't in NS. Each is a distinct, named
+        failure so the operator knows which link broke.
         """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             cust_ext = (r.get("customer_externalId") or "").strip()
             if not cust_ext:
                 self.add(2, BLOCKER, ba_ext, "BA customer_externalId is blank.")
-            elif cust_ext not in self.ns_customers:
+                continue
+            cnum = self.ext2_to_cnum.get(cust_ext)
+            if cnum is None:
                 self.add(
                     2,
                     BLOCKER,
                     ba_ext,
-                    f"BA customer_externalId {cust_ext!r} not found in NS "
-                    f"(by External ID 2).",
+                    f"BA customer_externalId {cust_ext!r} matches no customer-CSV "
+                    f"row (cannot map to a C-number).",
+                )
+            elif not cnum:
+                self.add(
+                    2,
+                    BLOCKER,
+                    ba_ext,
+                    f"BA customer {cust_ext!r}: customer-CSV row has no C-number "
+                    f"('{CUSTOMER_CNUM_COL}' blank); cannot resolve to NS.",
+                )
+            elif cnum not in self.ns_by_cnum:
+                self.add(
+                    2,
+                    BLOCKER,
+                    ba_ext,
+                    f"BA customer {cust_ext!r} → C-number {cnum} not found in NS.",
                 )
 
     def check_3_subsidiary(self):
@@ -507,8 +575,8 @@ class Validator:
         for ext, grp in self.sub_groups.items():
             header = grp[0]
             name = (header.get("Customer") or "").strip()
-            cust_ext = self.resolve_customer_ext(name)
-            if not cust_ext or cust_ext not in self.ns_customers:
+            cnum = self.sub_cnum(grp)
+            if not cnum or cnum not in self.ns_by_cnum:
                 continue  # already flagged by check 1
             sub_subsidiary_name = (header.get("Subsidiary") or "").strip()
             expected = SUB_SUBSIDIARY_MAP.get(sub_subsidiary_name)
@@ -521,14 +589,15 @@ class Validator:
                     f"SUBSIDIARY_MAP.",
                 )
                 continue
-            ns_subsidiary = self.ns_customers[cust_ext].get("subsidiary")
+            ns_subsidiary = self.ns_by_cnum[cnum].get("subsidiary")
             if str(ns_subsidiary) != str(expected):
                 self.add(
                     3,
                     BLOCKER,
                     ext,
                     f"sub subsidiary {expected} ({sub_subsidiary_name}) != "
-                    f"customer {cust_ext} NS subsidiary {ns_subsidiary}.",
+                    f"customer {name!r} (C-number {cnum}) NS subsidiary "
+                    f"{ns_subsidiary}.",
                 )
 
     def check_4_startdates(self):
@@ -716,11 +785,7 @@ class Validator:
         # batch and coverage is badly incomplete. UNSCOPED_RATIO mirrors the
         # standalone check_pricing_coverage.py gate.
         n_have = len(self.pricing_csv_extids)
-        if (
-            referenced
-            and missing
-            and n_have >= self.UNSCOPED_RATIO * len(referenced)
-        ):
+        if referenced and missing and n_have >= self.UNSCOPED_RATIO * len(referenced):
             self.add(
                 7.1,
                 WARNING,
@@ -754,7 +819,8 @@ class Validator:
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             cust_ext = (r.get("customer_externalId") or "").strip()
-            cust = self.ns_customers.get(cust_ext)
+            cnum = self.ext2_to_cnum.get(cust_ext)
+            cust = self.ns_by_cnum.get(cnum) if cnum else None
             if not cust:
                 continue  # flagged by check 2
             cid = cust.get("id")
@@ -768,8 +834,8 @@ class Validator:
                     8,
                     BLOCKER,
                     ba_ext,
-                    f"customer {cust_ext} (id {cid}) has no default "
-                    f"{' and '.join(missing)} address in NS; BA load skips.",
+                    f"customer {cust_ext} (C-number {cnum}, id {cid}) has no "
+                    f"default {' and '.join(missing)} address in NS; BA load skips.",
                 )
 
     def check_9_required_fields(self):
@@ -825,28 +891,18 @@ class Validator:
             if entities is None or CHECK_ENTITY[n] in entities
         ]
 
-        # Prefetch NS data only for the checks we'll run.
-        needs_customers = any(c in active_checks for c in (1, 2, 3, 8))
-        needs_entityids = 1.1 in active_checks
+        # Prefetch NS data only for the checks we'll run. All customer-touching
+        # checks (1, 1.1, 2, 3, 8) now resolve via the single C-number map.
+        needs_customers = any(c in active_checks for c in (1, 1.1, 2, 3, 8))
         needs_priceplans = 7 in active_checks
         needs_pricing_csv = 7.1 in active_checks
         needs_addresses = 8 in active_checks
 
         if needs_customers:
-            raw_ext = set()
-            for r in self.customers or []:
-                raw_ext.add((r.get("External ID 2") or "").strip())
-            for r in self.bas or []:
-                raw_ext.add((r.get("customer_externalId") or "").strip())
-            for grp in self.sub_groups.values():
-                ce = self.resolve_customer_ext(grp[0].get("Customer"))
-                if ce:
-                    raw_ext.add(ce)
-            print(f"  · querying NS for {len(raw_ext)} customer externalIds…")
-            self._fetch_ns_customers(raw_ext)
-
-        if needs_entityids:
-            cnames = set()
+            # Gather every C-number the in-scope checks might resolve: from the
+            # subs (deal C-numbers + the customer-CSV C-number by name) and from
+            # the BAs (customer_externalId bridged through the customer CSV).
+            cnums = set()
             for grp in self.sub_groups.values():
                 for col in (
                     "NETSUITE_ACCOUNT_NUMBER",
@@ -854,12 +910,19 @@ class Validator:
                 ):
                     v = self._group_value(grp, col)
                     if v:
-                        cnames.add(v)
+                        cnums.add(v)
+                nc = self.name_cnum(grp[0].get("Customer"))
+                if nc:
+                    cnums.add(nc)
+            for r in self.bas or []:
+                c = self.ext2_to_cnum.get((r.get("customer_externalId") or "").strip())
+                if c:
+                    cnums.add(c)
             print(
-                f"  · querying NS ({_env_label()}) for {len(cnames)} customer "
-                f"C-names (entityid)…"
+                f"  · querying NS ({_env_label()}) for {len(cnums)} customer "
+                f"C-numbers (entityid)…"
             )
-            self._fetch_ns_entityids(cnames)
+            self._fetch_ns_by_cnum(cnums)
 
         if needs_priceplans:
             rev_pps = set()
@@ -876,8 +939,10 @@ class Validator:
         if needs_pricing_csv:
             pricing_rows = _read_csv(config.PRICE_PLANS_CSV)
             if pricing_rows is None:
-                print(f"  ⚠ pricing CSV not found, skipping check 7.1: "
-                      f"{config.PRICE_PLANS_CSV}")
+                print(
+                    f"  ⚠ pricing CSV not found, skipping check 7.1: "
+                    f"{config.PRICE_PLANS_CSV}"
+                )
             else:
                 self.csv_loaded["pricing"] = True
                 self.pricing_csv_extids = {
@@ -885,11 +950,13 @@ class Validator:
                     for r in pricing_rows
                     if (r.get("PRICE_PLAN_EXTERNAL_ID") or "").strip()
                 }
-                print(f"  · read {len(self.pricing_csv_extids)} price-plan "
-                      f"externalIds from the pricing CSV…")
+                print(
+                    f"  · read {len(self.pricing_csv_extids)} price-plan "
+                    f"externalIds from the pricing CSV…"
+                )
 
         if needs_addresses:
-            cids = {c["id"] for c in self.ns_customers.values() if c.get("id")}
+            cids = {c["id"] for c in self.ns_by_cnum.values() if c.get("id")}
             print(f"  · querying NS addresses for {len(cids)} customers…")
             self._fetch_ns_addresses(cids)
 
