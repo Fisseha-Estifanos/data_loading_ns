@@ -13,13 +13,21 @@ Address resolution:
   billing and shipping. No extra API calls per record.
 """
 
+import csv
 import logging
+from collections import defaultdict
 from typing import Optional
 
 import config
 from loaders.base import BaseLoader
+from customer_resolver import CustomerResolver
 
 logger = logging.getLogger(__name__)
+
+
+def _deal_id(external_id: str) -> str:
+    """Deal id = the external id token before the first underscore."""
+    return external_id.split("_", 1)[0]
 
 
 # NS hard limit on the billingAccount.name field. Names exceeding this fail
@@ -78,6 +86,23 @@ class BillingAccountLoader(BaseLoader):
         # at the bottom of the run.
         self.name_truncations: list[str] = []
         self._load_address_maps()
+        # Resolve each BA's customer to its NS internal id directly from NS by
+        # C-number / externalId (no state tracker) — so a BA row for a
+        # pre-existing customer loads without seeding.
+        self.resolver = CustomerResolver(client)
+        self._prefetch_customers()
+
+    def _prefetch_customers(self) -> None:
+        """One batched NS query for every customer the billing CSV references."""
+        cnums, ext2s = set(), set()
+        for r in self.read_csv():
+            ext2 = (r.get("customer_externalId") or "").strip()
+            if ext2:
+                ext2s.add(ext2)
+                c = self.resolver.ext2_to_cnum.get(ext2)
+                if c:
+                    cnums.add(c)
+        self.resolver.prefetch(cnums, ext2s)
 
     def _load_address_maps(self):
         """
@@ -155,15 +180,15 @@ class BillingAccountLoader(BaseLoader):
             self.name_truncations.append(msg)
 
         # ── Resolve Customer Internal ID ────────────────────────────────
-        # Customer was loaded with a revisioned externalId; the state tracker
-        # is keyed on that, so suffix the raw CSV value before lookup.
-        customer_ext_id_rev = config.apply_revision(customer_ext_id)
-        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id_rev)
+        # Resolve straight from NS by C-number (bridged from customer_externalId
+        # via the customer CSV) or by the loaded/raw externalId — no state
+        # tracker, so pre-existing customers resolve without seeding.
+        cnum = self.resolver.ext2_to_cnum.get(customer_ext_id)
+        customer_ns_id = self.resolver.resolve(cnum, customer_ext_id)
         if not customer_ns_id:
             logger.error(
-                f"Cannot create billing account {ext_id}: "
-                f"customer {customer_ext_id_rev} has no NetSuite ID in state tracker. "
-                f"Ensure customers are loaded first."
+                f"Cannot create billing account {ext_id}: customer "
+                f"{customer_ext_id!r} not found in NS (by C-number or externalId)."
             )
             return None
 
@@ -226,6 +251,196 @@ class BillingAccountLoader(BaseLoader):
         # Remove None values (e.g. blank startDate)
         payload = {k: v for k, v in payload.items() if v is not None}
         return payload
+
+    # ── Create missing BAs (folds in the old create_billing_accounts.py) ──────
+    def create_missing(self, dry_run: bool = True) -> dict:
+        """Create a Billing Account for every subscription customer that has NONE
+        — no BA in NS and no BA row in the billing CSV.
+
+        Derives the bill/ship address from the customer's NS address book and the
+        rest (currency, frequency, start date) from the subscription; resolves the
+        customer by C-number (no state-tracker seeding). Required references are
+        never invented — a deal whose currency is unmapped, whose frequency is
+        blank, whose customer lacks an address, or whose billing schedule can't be
+        derived from the batch's other BAs is SKIPPED with a logged reason.
+
+        Dry-run (default) logs the payloads it would POST; ``dry_run=False`` POSTs
+        them and records each in the state tracker as ``<deal>_BA`` so the
+        subscription links to it.
+        """
+        from loaders.subscription import CURRENCY_MAP
+
+        ba_rows = self.read_csv()
+        ba_deals = {_deal_id((r.get("externalId") or "").strip()) for r in ba_rows}
+        # NS requires a billingSchedule; derive it from the batch's own BAs by
+        # frequency (UPPER) so a synthesized BA matches — never invented.
+        sched_by_freq: dict[str, set] = defaultdict(set)
+        for r in ba_rows:
+            fq = (r.get("frequency") or "").strip().upper()
+            sid = (r.get("billingSchedule_id") or "").strip()
+            if fq and sid:
+                sched_by_freq[fq].add(sid)
+
+        # Group subs by deal.
+        deal_rows: dict[str, list] = defaultdict(list)
+        try:
+            with open(config.SUBSCRIPTIONS_CSV, encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    e = (row.get("External ID") or "").strip()
+                    if e:
+                        deal_rows[_deal_id(e)].append(row)
+        except FileNotFoundError:
+            logger.error("Subs CSV not found at %s", config.SUBSCRIPTIONS_CSV)
+            return {"created": 0, "failed": 0, "skipped": 0}
+
+        # Resolve the subs customers (the resolver was prefetched for the billing
+        # CSV's customers; add the subs customers too) and find which already have
+        # a BA in NS.
+        def _first(rows, *cols):
+            for col in cols:
+                for r in rows:
+                    v = (r.get(col) or "").strip()
+                    if v:
+                        return v
+            return ""
+
+        cnums, ext2s = set(), set()
+        for rows in deal_rows.values():
+            cnums.add(
+                _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
+            )
+            nm = rows[0].get("Customer", "")
+            nc = self.resolver.name_cnum(nm)
+            if nc:
+                cnums.add(nc)
+            ex = self.resolver.name_ext(nm)
+            if ex:
+                ext2s.add(ex)
+        self.resolver.prefetch({c for c in cnums if c}, ext2s)
+
+        # Which of these customers already have a BA in NS?
+        cust_ids = set()
+        for rows in deal_rows.values():
+            cnum = (
+                _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
+                or self.resolver.name_cnum(rows[0].get("Customer", ""))
+            )
+            rec = self.resolver.resolve_record(cnum, self.resolver.name_ext(rows[0].get("Customer", "")))
+            if rec and rec.get("id"):
+                cust_ids.add(str(rec["id"]))
+        has_ba = self._customers_with_ba(cust_ids)
+
+        payloads, skips = [], []
+        for deal, rows in sorted(deal_rows.items()):
+            if deal in ba_deals:
+                continue  # a BA row is already being loaded for this deal
+            name = (rows[0].get("Customer") or "").strip()
+            cnum = (
+                _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
+                or self.resolver.name_cnum(name)
+            )
+            rec = self.resolver.resolve_record(cnum, self.resolver.name_ext(name))
+            if not (rec and rec.get("id")):
+                continue  # not in NS — the customer load owns this
+            cid = str(rec["id"])
+            if cid in has_ba:
+                continue  # already has a BA in NS — skip
+            bill_addr, ship_addr = self._bill_addr_map.get(cid), self._ship_addr_map.get(cid)
+            if not (bill_addr and ship_addr):
+                skips.append((deal, f"customer {name!r} (id {cid}) has no default "
+                                    f"billing/shipping address in NS — run "
+                                    f"repair_customer_addresses.py first"))
+                continue
+            currency_name = _first(rows, "Currency")
+            currency_id = CURRENCY_MAP.get(currency_name)
+            if not currency_id:
+                skips.append((deal, f"currency {currency_name!r} not in CURRENCY_MAP"))
+                continue
+            frequency = _first(rows, "PRICE_BOOK_FREQUENCY").upper()
+            if not frequency:
+                skips.append((deal, "PRICE_BOOK_FREQUENCY is blank (won't invent one)"))
+                continue
+            subsidiary_id = rec.get("subsidiary")
+            if not subsidiary_id:
+                skips.append((deal, f"customer {name!r} has no NS subsidiary on record"))
+                continue
+            scheds = sched_by_freq.get(frequency)
+            if not scheds:
+                skips.append((deal, f"no billing schedule known for frequency "
+                                    f"{frequency!r} (no {frequency} BA in the billing CSV)"))
+                continue
+            if len(scheds) > 1:
+                skips.append((deal, f"ambiguous billing schedule for {frequency!r}: "
+                                    f"{sorted(scheds)}"))
+                continue
+            start_dates = sorted(
+                (r.get("Start Date") or "").strip() for r in rows
+                if (r.get("Start Date") or "").strip()
+            )
+            ext_id = config.apply_revision(f"{deal}_BA")
+            ba_name, _ = _truncate_ba_name(f"{name}_{frequency}_MP_{currency_name}")
+            payload = {
+                "externalId": ext_id,
+                "name": ba_name,
+                "customer": {"id": cid},
+                "subsidiary": {"id": str(subsidiary_id)},
+                "currency": {"id": str(currency_id)},
+                "frequency": {"id": frequency},
+                "billingSchedule": {"id": next(iter(scheds))},
+                "customerDefault": False,
+                "requestOffCycleInvoice": False,
+                "inactive": False,
+                "billAddressList": bill_addr,
+                "shipAddressList": ship_addr,
+            }
+            if start_dates:
+                payload["startDate"] = start_dates[0]
+            payloads.append((ext_id, payload, name))
+
+        for deal, reason in skips:
+            logger.warning("create_missing SKIP deal %s: %s", deal, reason)
+        logger.info(
+            "create_missing: %d BA(s) to create, %d skipped", len(payloads), len(skips)
+        )
+
+        created = failed = 0
+        import json
+        for ext_id, payload, name in payloads:
+            if dry_run:
+                logger.info("DRY RUN would create %s (%s):\n%s", ext_id, name,
+                            json.dumps(payload, indent=2))
+                continue
+            status, ns_id, error = self.client.create_and_resolve_id(
+                record_type="billingAccount", payload=payload,
+                external_id=ext_id, tier3_field="externalId", tier3_value=ext_id,
+            )
+            self.tracker.upsert_state(
+                entity_type="billingAccount", external_id=ext_id, status=status,
+                netsuite_id=ns_id, error_message=error, payload_hash=None,
+                tier_used="create_missing",
+            )
+            if status == "success":
+                created += 1
+                logger.info("  ✓ %s → NS id %s", ext_id, ns_id)
+            else:
+                failed += 1
+                logger.error("  ✗ %s: %s", ext_id, error)
+        return {"created": created, "failed": failed, "skipped": len(skips),
+                "dry_run": dry_run, "total": len(payloads)}
+
+    def _customers_with_ba(self, customer_internal_ids) -> set:
+        """Set of customer internal ids that already have ≥1 Billing Account in NS."""
+        have = set()
+        ids = sorted({str(i) for i in customer_internal_ids if i})
+        for i in range(0, len(ids), 200):
+            chunk = ids[i : i + 200]
+            in_clause = ",".join("'" + c + "'" for c in chunk)
+            q = f"SELECT customer FROM billingaccount WHERE customer IN ({in_clause})"
+            for row in self.client.suiteql_query(q):
+                c = row.get("customer")
+                if c:
+                    have.add(str(c))
+        return have
 
     def patch_startdates(self, dry_run: bool = False) -> dict:
         """

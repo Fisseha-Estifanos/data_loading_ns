@@ -10,7 +10,9 @@ Key design:
     plan-defining row (NULL on component/add-on rows). Those two fields are
     resolved by scanning all rows in the group for a non-empty value.
   - Each row produces a list of item names to include (split from comma-separated Sales Item cells)
-  - Customer is resolved by company name → customer CSV External ID 2 → state tracker
+  - Customer is resolved to its NS internal id by C-number / externalId, straight
+    from NetSuite (see customer_resolver.CustomerResolver) — NOT via the state
+    tracker, so pre-existing customers resolve without seeding
   - Billing account is resolved by {deal_id}_BA → state tracker (if available)
 
 Two-step subscription creation:
@@ -32,6 +34,7 @@ from typing import Optional
 
 import config
 from loaders.base import BaseLoader
+from customer_resolver import CustomerResolver
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +69,11 @@ class SubscriptionLoader(BaseLoader):
 
     def __init__(self, client, tracker):
         super().__init__(client, tracker)
-        # Pre-load customer name → external ID mapping from customer CSV
-        self._customer_name_to_ext_id = self._build_customer_name_map()
+        # Resolve each subscription's customer to its NS internal id directly
+        # from NetSuite, by C-number / externalId (no state-tracker dependency,
+        # so pre-existing customers resolve without seeding).
+        self.resolver = CustomerResolver(client)
+        self._prefetch_customers()
         # ext_id → ordered list of (item_name, price_plan_external_id_or_None).
         # price_plan_external_id is populated from the CSV's "Price Plan External ID"
         # column. None means the row had no price plan (NS will fall back to the
@@ -75,20 +81,42 @@ class SubscriptionLoader(BaseLoader):
         # time via the state tracker.
         self._pending_lines: dict[str, list[tuple[str, Optional[str]]]] = {}
 
-    def _build_customer_name_map(self) -> dict:
-        """Read customer CSV to build company name → External ID 2 lookup."""
-        mapping = {}
-        try:
-            with open(config.CUSTOMERS_CSV, "r", encoding="utf-8-sig") as f:
-                for row in csv.DictReader(f):
-                    name = row.get("Company Name", "").strip().upper()
-                    ext_id = row.get("External ID 2", "").strip()
-                    if name and ext_id:
-                        mapping[name] = ext_id
-        except FileNotFoundError:
-            logger.error(f"Customer CSV not found at {config.CUSTOMERS_CSV}")
-        logger.info(f"Built customer name→extId map: {len(mapping)} entries")
-        return mapping
+    def _prefetch_customers(self) -> None:
+        """One batched NS query for every customer the subs reference.
+
+        Gathers C-numbers (the subs' NETSUITE_ACCOUNT_NUMBER* columns, plus the
+        customer CSV's C-number by name) and External ID 2s (by name), then
+        prefetches their NS internal ids so per-group resolution is local.
+        """
+        cnums, ext2s = set(), set()
+        for row in self.read_csv():
+            name = row.get("Customer", "")
+            for col in ("NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"):
+                v = (row.get(col) or "").strip()
+                if v:
+                    cnums.add(v)
+            nc = self.resolver.name_cnum(name)
+            if nc:
+                cnums.add(nc)
+            ext2 = self.resolver.name_ext(name)
+            if ext2:
+                ext2s.add(ext2)
+        self.resolver.prefetch(cnums, ext2s)
+        logger.info(
+            "Customer resolver: %d C-numbers + %d externalIds known in NS",
+            len(self.resolver.ns_by_cnum),
+            len(self.resolver.ns_by_ext),
+        )
+
+    @staticmethod
+    def _first_value(rows: list[dict], *cols: str) -> str:
+        """First non-empty value of any of `cols` across a group's rows."""
+        for col in cols:
+            for r in rows:
+                v = (r.get(col) or "").strip()
+                if v:
+                    return v
+        return ""
 
     def get_external_id(self, row: dict) -> str:
         return row.get("External ID", "").strip()
@@ -176,20 +204,22 @@ class SubscriptionLoader(BaseLoader):
         header = rows[0]
 
         customer_name = header.get("Customer", "").strip()
-        customer_ext_id = self._customer_name_to_ext_id.get(customer_name.upper())
-        if not customer_ext_id:
-            logger.error(
-                f"Subscription {raw_ext_id}: cannot resolve customer "
-                f"'{customer_name}' to external ID"
+        # Resolve the customer's NS internal id by C-number (subs columns, else
+        # the customer CSV by name) or by its loaded/raw External ID 2 — straight
+        # from NetSuite, no state tracker. Pre-existing customers resolve here
+        # without seeding.
+        cnum = (
+            self._first_value(
+                rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"
             )
-            return None
-
-        customer_ext_id_rev = config.apply_revision(customer_ext_id)
-        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id_rev)
+            or self.resolver.name_cnum(customer_name)
+        )
+        ext2 = self.resolver.name_ext(customer_name)
+        customer_ns_id = self.resolver.resolve(cnum, ext2)
         if not customer_ns_id:
             logger.error(
-                f"Subscription {raw_ext_id}: customer {customer_ext_id_rev} "
-                f"has no NS ID. Ensure customers are loaded first."
+                f"Subscription {raw_ext_id}: cannot resolve customer "
+                f"'{customer_name}' to an NS customer (by C-number or externalId)."
             )
             return None
 
