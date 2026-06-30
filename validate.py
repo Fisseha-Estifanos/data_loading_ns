@@ -46,7 +46,7 @@ WARNING = "WARNING"
 # NOT exist in NetSuite — confirmed by GET: 0/14 found by externalId, 10/10
 # found by entityid. So the C-number is the authoritative key to resolve a
 # customer to its NS record, used everywhere in this validator.
-CUSTOMER_CNUM_COL = "n/a 2"
+CUSTOMER_CNUM_COL = "C-number"
 
 # Each check → which entity load it guards. Used to filter when --entity given.
 CHECK_ENTITY = {
