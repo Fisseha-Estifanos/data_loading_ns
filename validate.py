@@ -51,95 +51,90 @@ CUSTOMER_CNUM_COL = "C-number"
 # Each check → which entity load it guards. Used to filter when --entity given.
 CHECK_ENTITY = {
     1: "subscription",
-    1.1: "subscription",
-    1.2: "subscription",
-    1.3: "subscription",
-    2: "billingAccount",
-    2.1: "subscription",
+    2: "subscription",
     3: "subscription",
-    4: "billingAccount",
-    5: "subscription",
+    4: "subscription",
+    5: "billingAccount",
     6: "subscription",
     7: "subscription",
-    7.1: "subscription",
     8: "billingAccount",
-    9: "billingAccount",
-    10: "billingAccount",
+    9: "subscription",
+    10: "subscription",
+    11: "subscription",
+    12: "billingAccount",
+    13: "billingAccount",
+    14: "billingAccount",
 }
 
 # Severity each check emits. Used so a "not evaluated" finding (missing input)
 # carries the check's native severity — you can't confirm a BLOCKER check is
 # safe if its input is absent, so that absence must itself block.
-BLOCKER_CHECKS = {1, 1.1, 2, 3, 4, 5, 8, 9}
+BLOCKER_CHECKS = {1, 2, 5, 7, 8, 9, 12, 13}
 
 # CSV inputs each check requires to produce a meaningful result. If any are
 # missing (None from _read_csv — a bad path in config), run() skips the check
 # with ONE "(input) not evaluated" finding instead of running it against empty
 # data. Two failure modes this prevents, both seen/possible in this validator:
 #   • false-finding STORM — a check comparing present records against an empty
-#     reference set flags every record (check 7.1 did this for a missing pricing
+#     reference set flags every record (check 11 did this for a missing pricing
 #     CSV; check 1 would for a missing customer CSV).
 #   • false CLEAN — a check that only ITERATES a missing CSV emits nothing and
-#     the report prints "✓ clean", hiding that it never ran (checks 9/10 vs a
+#     the report prints "✓ clean", hiding that it never ran (checks 13/14 vs a
 #     missing BA CSV).
 # A CSV is listed whether the check iterates it (subject) or reads it to resolve
 # references — either way an absent file makes the result meaningless.
 CHECK_REQUIRED_CSVS = {
     1: {"subscription", "customer"},
-    1.1: {"subscription"},
-    1.2: {"subscription", "customer"},
-    1.3: {"subscription", "customer"},
-    2: {"billingAccount"},
-    2.1: {"subscription"},
+    2: {"subscription"},
     3: {"subscription", "customer"},
-    4: {"subscription", "billingAccount"},
-    5: {"subscription"},
-    6: {"subscription", "billingAccount"},
-    7: {"subscription"},
-    7.1: {"subscription", "pricing"},
-    8: {"billingAccount"},
-    9: {"billingAccount"},
-    10: {"billingAccount"},
+    4: {"subscription", "customer"},
+    5: {"billingAccount"},
+    6: {"subscription"},
+    7: {"subscription", "customer"},
+    8: {"subscription", "billingAccount"},
+    9: {"subscription"},
+    10: {"subscription"},
+    11: {"subscription", "pricing"},
+    12: {"billingAccount"},
+    13: {"billingAccount"},
+    14: {"billingAccount"},
 }
 
 # Major group each check belongs to, in dispatch (sorted) order. The report
 # prints a "++++" divider with the group name the first time a check from a new
-# group appears, so the output can be skimmed by eye. Checks run 1, 1.1, 2, 3,
-# 4, 5, 6, 7, 7.1, 8, 9, 10 — themes interleave by number, which is intentional.
+# group appears, so the output can be skimmed by eye.
 CHECK_GROUP = {
     1: "CUSTOMERS — subscription resolves to an NS customer",
-    1.1: "CUSTOMERS — subscription resolves to an NS customer",
-    1.2: "CUSTOMERS — subscription resolves to an NS customer",
-    1.3: "CUSTOMERS — subscription resolves to an NS customer",
-    2: "BILLING ACCOUNTS — customer link",
-    2.1: "BILLING ACCOUNTS — subs customer already has one in NS (load vs skip)",
-    3: "SUBSCRIPTIONS — subsidiary match",
-    4: "BILLING ACCOUNTS — start dates",
-    5: "SUBSCRIPTIONS — sales items",
-    6: "BILLING ACCOUNTS ↔ SUBSCRIPTIONS — deal alignment",
-    7: "PRICE PLANS — coverage (NS + pricing CSV)",
-    7.1: "PRICE PLANS — coverage (NS + pricing CSV)",
-    8: "BILLING ACCOUNTS — addresses & required fields",
-    9: "BILLING ACCOUNTS — addresses & required fields",
-    10: "BILLING ACCOUNTS — addresses & required fields",
+    2: "CUSTOMERS — subscription resolves to an NS customer",
+    3: "CUSTOMERS — subscription resolves to an NS customer",
+    4: "CUSTOMERS — subscription resolves to an NS customer",
+    5: "BILLING ACCOUNTS — customer link",
+    6: "BILLING ACCOUNTS — subs customer already has one in NS (load vs skip)",
+    7: "SUBSCRIPTIONS — subsidiary match",
+    8: "BILLING ACCOUNTS — start dates",
+    9: "SUBSCRIPTIONS — sales items",
+    10: "PRICE PLANS — coverage (NS + pricing CSV)",
+    11: "PRICE PLANS — coverage (NS + pricing CSV)",
+    12: "BILLING ACCOUNTS — addresses & required fields",
+    13: "BILLING ACCOUNTS — addresses & required fields",
+    14: "BILLING ACCOUNTS — addresses & required fields",
 }
 
 CHECK_TITLE = {
     1: "Sub customer resolves to an NS customer (by C-number)",
-    1.1: "Sub customer's C-number is in the subs export AND exists in NS",
-    1.2: "Sub customer already in NS (skip load) vs must be created (load)",
-    1.3: "Flagged customer: truly absent from NS vs in NS under a different id",
-    2: "BA customer resolves to an NS customer (by C-number via customer CSV)",
-    2.1: "Subs customer already has a Billing Account in NS (skip) vs needs one",
-    3: "Sub subsidiary == its customer's NS subsidiary",
-    4: "BA startDate present and <= earliest sub Start Date for the deal",
-    5: "Active sub line Sales Item is mapped (not blank / not NOT MAPPED)",
-    6: "BA <-> sub deal alignment (every deal has both)",
-    7: "Sub line Price Plan External ID exists in NS",
-    7.1: "Sub line Price Plan External ID exists in the pricing CSV",
-    8: "BA customer has default billing AND shipping address in NS",
-    9: "BA required fields present (subsidiary_id, currency_id)",
-    10: "externalId shape sanity (BA = <deal_id>_BA)",
+    2: "Subs export's own C-number is valid in NS",
+    3: "Sub customer already in NS (skip load) vs must be created (load)",
+    4: "Flagged customer: truly absent from NS vs in NS under a different id",
+    5: "BA customer resolves to an NS customer (by C-number via customer CSV)",
+    6: "Subs customer already has a Billing Account in NS (skip) vs needs one",
+    7: "Sub subsidiary == its customer's NS subsidiary",
+    8: "BA startDate present and <= earliest sub Start Date for the deal",
+    9: "Active sub line Sales Item is mapped (not blank / not NOT MAPPED)",
+    10: "Sub line Price Plan External ID exists in NS",
+    11: "Sub line Price Plan External ID exists in the pricing CSV",
+    12: "BA customer has default billing AND shipping address in NS",
+    13: "BA required fields present (subsidiary_id, currency_id)",
+    14: "externalId shape sanity (BA = <deal_id>_BA)",
 }
 
 # One- to two-line plain-language explainer per check, printed under its heading
@@ -148,38 +143,37 @@ CHECK_EXPLAIN = {
     1: "Can each sub's customer be resolved to a real NS customer by C-number "
     "(subs C-number, else customers-CSV)? Clean = customer already in NS, no "
     "need to create it.",
-    1.1: "Same, but using ONLY the C-number the subs export itself carries (no "
-    "customers-CSV fallback). Confirms the subs file alone identifies a "
-    "customer that exists in NS.",
-    1.2: "Per distinct customer: already in NS (skip — don't load it) or NOT in "
+    2: "Validates the C-number the subs export ITSELF carries "
+    "(NETSUITE_ACCOUNT_NUMBER*) actually exists in NS — catches a wrong/stale "
+    "account number even when check 1 resolved the customer another way. Silent "
+    "when the subs carry no C-number (check 1/3 own that).",
+    3: "Per distinct customer: already in NS (skip — don't load it) or NOT in "
     "NS (must be created/loaded first). Warns only on the ones to create; clean "
     "= every sub customer already exists in NS.",
-    1.3: "For customers 1.2 couldn't resolve by id: is one in NS by company name "
-    "anyway? Separates 'truly absent — create it' from 'in NS but the C-number / "
-    "External ID 2 bridge failed — reconcile, don't duplicate'.",
-    2: "Does each billing account point at a real NS customer? Bridges its "
+    4: "For customers check 3 couldn't resolve by id: is one in NS by company "
+    "name anyway? Separates 'truly absent — create it' from 'in NS but the "
+    "C-number / External ID 2 bridge failed — reconcile, don't duplicate'.",
+    5: "Does each billing account point at a real NS customer? Bridges its "
     "MP_HubSpot id → customers CSV → C-number → NS.",
-    2.1: "Asked straight of NS: does each subs customer already have a Billing "
+    6: "Asked straight of NS: does each subs customer already have a Billing "
     "Account? Load BAs only for those that don't. Warns when a customer has "
     "NO BA in NS AND none in the billing CSV — its sub would be unbilled.",
-    3: "Does each sub's Subsidiary match its NS customer's subsidiary? A mismatch "
+    7: "Does each sub's Subsidiary match its NS customer's subsidiary? A mismatch "
     "is a hard NS 400 at load time.",
-    4: "Is each BA's startDate present and on/before its earliest subscription? "
+    8: "Is each BA's startDate present and on/before its earliest subscription? "
     "A blank/late start breaks the subs it bills.",
-    5: "Does every included sub line map to a real Sales Item (not blank / not "
+    9: "Does every included sub line map to a real Sales Item (not blank / not "
     "'NOT MAPPED')? Unmapped lines are silently skipped at load.",
-    6: "Does every deal have BOTH a subscription and a billing account? Warns on "
-    "either side missing (sub with no BA, or orphan BA).",
-    7: "Does each line's price plan already exist in NS? Warn = not loaded yet; "
+    10: "Does each line's price plan already exist in NS? Warn = not loaded yet; "
     "the line would fall back to the price-book default.",
-    7.1: "Does each line's price plan exist in the pricing CSV (i.e. CAN be "
+    11: "Does each line's price plan exist in the pricing CSV (i.e. CAN be "
     "created)? Warn = no source row to push; line can only use the book "
     "default.",
-    8: "Does each BA's customer have BOTH a default billing and shipping address "
+    12: "Does each BA's customer have BOTH a default billing and shipping address "
     "in NS? If not, the BA loader can't resolve them and skips the BA.",
-    9: "Does each BA have its mandatory NS reference fields (subsidiary_id, "
+    13: "Does each BA have its mandatory NS reference fields (subsidiary_id, "
     "currency_id) filled in the CSV?",
-    10: "Does each BA externalId follow the '<deal_id>_BA' convention? Drift here "
+    14: "Does each BA externalId follow the '<deal_id>_BA' convention? Drift here "
     "quietly misaligns BAs and subs.",
 }
 
@@ -189,7 +183,7 @@ class Finding:
     """One problem reported by a single check.
 
     Attributes:
-        check:    the check number that produced it (e.g. 1, 1.1, 5). Used to
+        check:    the check number that produced it (e.g. 1, 5, 14). Used to
                   group findings under their check heading in the report.
         severity: BLOCKER or WARNING. Any BLOCKER makes the run exit non-zero.
         ident:    the offending record's identifier — a subscription/deal
@@ -233,7 +227,7 @@ def _deal_id(external_id: str) -> str:
     the subscription loader uses to derive the shared billing-account key, so a
     sub `External ID` (`494812626113_a_27397`), a BA `externalId`
     (`494812626113_BA`), and the deal itself all collapse to `494812626113`.
-    Used by checks 4 and 6 to line subscriptions and BAs up by deal.
+    Used by the BA/subscription checks to line subscriptions and BAs up by deal.
     """
     return external_id.split("_", 1)[0]
 
@@ -306,9 +300,9 @@ class Validator:
         # MISSING (bad path in config) — distinct from present-but-empty ([]).
         # The dispatch loop in run() consults this so a check whose required CSV
         # is missing is reported as "not evaluated" rather than run against empty
-        # data (which would either falsely flag every record — check 7.1's old
+        # data (which would either falsely flag every record — check 11's old
         # bug — or silently report a misleading "clean"). "pricing" is filled in
-        # run()'s prefetch, since it's only read when check 7.1 is in scope.
+        # run()'s prefetch, since it's only read when check 11 is in scope.
         self.csv_loaded = {
             "customer": self.customers is not None,
             "billingAccount": self.bas is not None,
@@ -372,11 +366,11 @@ class Validator:
         #     {id, subsidiary, externalid, companyname, entityid}.
         self.ns_by_cnum: dict[str, dict] = {}
         self.ns_by_ext: dict[str, dict] = {}
-        # UPPER(companyname) → record. Last-resort lookup for check 1.3 only:
+        # UPPER(companyname) → record. Last-resort lookup for check 4 only:
         # tells "truly absent from NS" apart from "in NS but the id bridge failed".
         self.ns_by_name: dict[str, dict] = {}
         # Customer INTERNAL ids that already have ≥1 Billing Account in NS — asked
-        # directly of NS (check 2.1), so we load BAs only for customers without one.
+        # directly of NS (check 6), so we load BAs only for customers without one.
         self.ns_cust_has_ba: set[str] = set()
         self.ns_priceplans: set[str] = set()  # revisioned extIds that exist
         self.pricing_csv_extids: set[str] = set()  # RAW extIds in the pricing CSV
@@ -440,8 +434,8 @@ class Validator:
         """Resolve customers in NS by their C-number (``entityid``) and cache them.
 
         Populates ``self.ns_by_cnum`` ({entityid → {id, subsidiary, externalid,
-        companyname}}) — the one customer map every customer-touching check
-        (1, 1.1, 2, 3, 8) reads from. Queried in chunks of ≤200 via ``WHERE
+        companyname}}) — the customer map the customer-touching checks read
+        from. Queried in chunks of ≤200 via ``WHERE
         entityid IN (...)``. The C-number is env-agnostic and is what actually
         exists in NS (the customer CSV's External ID 2 holds a HubSpot id that
         does not — see CUSTOMER_CNUM_COL). Only C-numbers that exist in the
@@ -491,7 +485,7 @@ class Validator:
         """Resolve customers in NS by exact (case-insensitive) company name.
 
         Populates ``self.ns_by_name`` ({UPPER(companyname) → {id, entityid,
-        externalid, companyname}}) for check 1.3's last-resort lookup. ``names``
+        externalid, companyname}}) for check 4's last-resort lookup. ``names``
         are already alias-resolved and uppercased by the caller. EXACT upper
         match (``WHERE UPPER(companyname) IN (...)``) — deliberately no fuzzy
         matching, so a hit is trustworthy; a miss means "not found by exact
@@ -518,7 +512,7 @@ class Validator:
 
         For the given customer INTERNAL ids, queries the ``billingaccount``
         record and fills ``self.ns_cust_has_ba`` with the ids that have at least
-        one. Check 2.1 then asks "is this subs customer's id in that set?". Asked
+        one. Check 6 then asks "is this subs customer's id in that set?". Asked
         straight of NS — no state tracker, no customer CSV — so it works even when
         the customer/billing CSVs are trimmed to just the new records.
         """
@@ -641,22 +635,18 @@ class Validator:
                     f"its sub (otherwise the sub is skipped). Verify manually.",
                 )
 
-    def check_1_1_customer_in_env(self):
-        """Confirm the customer exists in the ACTIVE env using the C-number the
-        SUBS EXPORT itself carries — the deal-level data-completeness companion
-        to check 1. The subs CSV carries two C-numbers: NETSUITE_ACCOUNT_NUMBER
-        (deal/customer level) and NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL
-        (company/parent level). Try the first; if it resolves, that suffices.
-        Else try the second.
+    def check_2_subs_cnumber_valid(self):
+        """Check 2 (BLOCKER): the C-number the SUBS EXPORT itself carries is real.
 
-        Unlike check 1, this does NOT fall back to the customer CSV — it answers
-        specifically "does the subs export stand on its own?". So:
-          • both C-numbers BLANK → WARNING. The subs export carries no C-number
-            for this deal (check 1 may still resolve it via the customer CSV).
-            Names the customer so it can be eyeballed against the customers CSV.
-          • a C-number IS present but not found in NS → BLOCKER. A concrete id
-            that doesn't exist in the active env — a real "customer not in this
-            NS account" problem."""
+        The subs CSV carries two C-numbers: NETSUITE_ACCOUNT_NUMBER (deal/customer
+        level) and NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL (company/parent level).
+        Unlike check 1, this does NOT fall back to the customer CSV — so it
+        catches a WRONG/STALE account number in the subs export even when check 1
+        resolved the customer another way (e.g. via the loaded externalId).
+
+        Blocks only when the subs carry a C-number AND none of the present ones
+        resolve in NS. Both-blank is SILENT here — that "no C-number" case is
+        owned by checks 1 and 3, so we don't double-warn."""
         env = _env_label()
         for ext, grp in self.sub_groups.items():
             name = (grp[0].get("Customer") or "").strip()
@@ -667,28 +657,18 @@ class Validator:
             if acct_co and acct_co in self.ns_by_cnum:
                 continue  # found at company level
             tried = [v for v in (acct, acct_co) if v]
-            if not tried:
+            if tried:  # a C-number is present but none resolved → wrong/stale id
                 self.add(
-                    1.1,
-                    WARNING,
-                    ext,
-                    f"customer {name!r}: no C-number in subs data "
-                    f"(NETSUITE_ACCOUNT_NUMBER and _COMPANY_LEVEL both blank); "
-                    f"cannot confirm in {env} from the subs export alone. Check 1 "
-                    f"may still resolve it via the customers CSV — verify {name!r} "
-                    f"there.",
-                )
-            else:
-                self.add(
-                    1.1,
+                    2,
                     BLOCKER,
                     ext,
-                    f"customer {name!r}: C-name(s) {', '.join(tried)} not found "
-                    f"in {env} NS by entityid.",
+                    f"customer {name!r}: subs C-number(s) {', '.join(tried)} not "
+                    f"found in {env} NS by entityid — wrong/stale account number "
+                    f"in the subs export.",
                 )
 
-    def check_1_2_customer_load_status(self):
-        """Check 1.2 (WARNING): which sub customers must be CREATED vs already exist.
+    def check_3_customer_load_status(self):
+        """Check 3 (WARNING): which sub customers must be CREATED vs already exist.
 
         The explicit load-vs-skip view, deduplicated per customer (check 1 is
         per deal and frames this as resolution success/failure). For each
@@ -715,7 +695,7 @@ class Validator:
         for name, in_ns in sorted(status.items()):
             if not in_ns:
                 self.add(
-                    1.2,
+                    3,
                     WARNING,
                     name,
                     f"customer {name!r}: NOT in NS — must be created/loaded before "
@@ -723,17 +703,17 @@ class Validator:
                     f"Customers not listed here already exist in NS (skip load).",
                 )
 
-    def check_1_3_customer_name_in_ns(self):
-        """Check 1.3 (WARNING): for customers UNRESOLVED by id, is one in NS by name?
+    def check_4_customer_name_in_ns(self):
+        """Check 4 (WARNING): for customers UNRESOLVED by id, is one in NS by name?
 
-        The companion to 1.2 that tells two very different situations apart, for
-        each customer that could NOT be resolved by C-number or externalId:
+        The companion to check 3 that tells two very different situations apart,
+        for each customer that could NOT be resolved by C-number or externalId:
           • a customer with that company name EXISTS in NS → it IS in NS; only the
             id bridge (C-number / External ID 2) failed. Do NOT create a
             duplicate — reconcile the identifiers. Reports the NS id / entityid /
             externalid so the operator can fix the mapping.
           • no NS customer with that exact name → genuinely absent; create/load it.
-        Only customers 1.2 would flag are considered (resolved-by-id ones are
+        Only customers check 3 would flag are considered (resolved-by-id ones are
         skipped). EXACT (case-insensitive) name match — see _fetch_ns_by_name.
         """
         resolved_by_id: dict[str, bool] = {}
@@ -747,12 +727,12 @@ class Validator:
             resolved_by_id[name] = resolved_by_id.get(name, False) or (rec is not None)
         for name, by_id in sorted(resolved_by_id.items()):
             if by_id:
-                continue  # in NS by id — fine (check 1 / 1.2 cover it)
+                continue  # in NS by id — fine (check 1 / 3 cover it)
             alias = config.CUSTOMER_NAME_ALIASES.get(name.upper(), name).upper()
             hit = self.ns_by_name.get(alias)
             if hit:
                 self.add(
-                    1.3,
+                    4,
                     WARNING,
                     name,
                     f"customer {name!r}: NOT resolvable by C-number/externalId, but "
@@ -763,7 +743,7 @@ class Validator:
                 )
             else:
                 self.add(
-                    1.3,
+                    4,
                     WARNING,
                     name,
                     f"customer {name!r}: not in NS by C-number, externalId, OR exact "
@@ -771,8 +751,8 @@ class Validator:
                     f"expected it to exist, check the NS name spelling).",
                 )
 
-    def check_2_ba_customer(self):
-        """Check 2 (BLOCKER): every BA points at a real NS customer.
+    def check_5_ba_customer(self):
+        """Check 5 (BLOCKER): every BA points at a real NS customer.
 
         The billing CSV carries only ``customer_externalId`` (an MP_HubSpot id).
         Resolution via ``customer_ns_record``: by C-number (bridged through the
@@ -786,7 +766,7 @@ class Validator:
             ba_ext = (r.get("externalId") or "").strip()
             cust_ext = (r.get("customer_externalId") or "").strip()
             if not cust_ext:
-                self.add(2, BLOCKER, ba_ext, "BA customer_externalId is blank.")
+                self.add(5, BLOCKER, ba_ext, "BA customer_externalId is blank.")
                 continue
             cnum = self.ext2_to_cnum.get(cust_ext)
             if self.customer_ns_record(cnum, cust_ext):
@@ -796,7 +776,7 @@ class Validator:
             who = f"{name!r} ({cust_ext})" if name else f"{cust_ext!r}"
             if cnum is None:
                 self.add(
-                    2,
+                    5,
                     BLOCKER,
                     ba_ext,
                     f"BA customer {who} matches no customer-CSV row and is not in "
@@ -804,7 +784,7 @@ class Validator:
                 )
             elif not cnum:
                 self.add(
-                    2,
+                    5,
                     BLOCKER,
                     ba_ext,
                     f"BA customer {who}: customer-CSV row has no C-number "
@@ -813,15 +793,15 @@ class Validator:
                 )
             else:
                 self.add(
-                    2,
+                    5,
                     BLOCKER,
                     ba_ext,
                     f"BA customer {who} → C-number {cnum} not found in NS "
                     f"(and not loaded under its externalId).",
                 )
 
-    def check_2_1_subs_customer_has_ba(self):
-        """Check 2.1 (WARNING): every subscription's customer has a Billing Account
+    def check_6_subs_customer_has_ba(self):
+        """Check 6 (WARNING): every subscription's customer has a Billing Account
         — either already in NS, or one being loaded in the billing CSV.
 
         Asked straight of NetSuite: a customer's NS internal id is matched against
@@ -853,13 +833,13 @@ class Validator:
                 info["id"] = rec["id"]
         for name, info in sorted(cust.items()):
             if not info["id"]:
-                continue  # not in NS — check 1 / 1.2 / 1.3 own this
+                continue  # not in NS — checks 1 / 3 / 4 own this
             has_ns_ba = str(info["id"]) in self.ns_cust_has_ba
             has_csv_ba = bool(info["deals"] & ba_deals)
             if has_ns_ba or has_csv_ba:
                 continue  # covered
             self.add(
-                2.1,
+                6,
                 WARNING,
                 name,
                 f"customer {name!r} (id {info['id']}) has NO Billing Account in NS "
@@ -868,8 +848,8 @@ class Validator:
                 f"bill against an existing NS account.",
             )
 
-    def check_3_subsidiary(self):
-        """Check 3 (BLOCKER): sub subsidiary matches its customer's NS subsidiary.
+    def check_7_subsidiary(self):
+        """Check 7 (BLOCKER): sub subsidiary matches its customer's NS subsidiary.
 
         Maps the sub's ``Subsidiary`` name through SUBSIDIARY_MAP to an NS id and
         compares it against the customer's ``subsidiary`` as recorded in NS. A
@@ -888,7 +868,7 @@ class Validator:
             expected = SUB_SUBSIDIARY_MAP.get(sub_subsidiary_name)
             if expected is None:
                 self.add(
-                    3,
+                    7,
                     BLOCKER,
                     ext,
                     f"sub Subsidiary {sub_subsidiary_name!r} is not in "
@@ -898,15 +878,15 @@ class Validator:
             ns_subsidiary = rec.get("subsidiary")
             if str(ns_subsidiary) != str(expected):
                 self.add(
-                    3,
+                    7,
                     BLOCKER,
                     ext,
                     f"sub subsidiary {expected} ({sub_subsidiary_name}) != "
                     f"customer {name!r} NS subsidiary {ns_subsidiary}.",
                 )
 
-    def check_4_startdates(self):
-        """Check 4 (BLOCKER): BA startDate is present and not after its subs.
+    def check_8_startdates(self):
+        """Check 8 (BLOCKER): BA startDate is present and not after its subs.
 
         For each deal, finds the earliest sub ``Start Date``, then for the deal's
         BA: blocks if ``startDate`` is blank (NS would default it to today,
@@ -929,7 +909,7 @@ class Validator:
             ba_start = (r.get("startDate") or "").strip()
             if not ba_start:
                 self.add(
-                    4,
+                    8,
                     BLOCKER,
                     ba_ext,
                     "BA startDate is blank (NS would default to today, "
@@ -939,15 +919,15 @@ class Validator:
             sub_start = earliest.get(deal)
             if sub_start and ba_start > sub_start:
                 self.add(
-                    4,
+                    8,
                     BLOCKER,
                     ba_ext,
                     f"BA startDate {ba_start} > earliest sub Start Date "
                     f"{sub_start} for deal {deal}.",
                 )
 
-    def check_5_sales_item(self):
-        """Check 5 (BLOCKER): every active sub line maps to a real Sales Item.
+    def check_9_sales_item(self):
+        """Check 9 (BLOCKER): every active sub line maps to a real Sales Item.
 
         Scans the included lines (``Lines: Include == 'T'``) of each sub group
         and counts those whose ``Sales Item`` is blank or the literal
@@ -973,35 +953,15 @@ class Validator:
                 if n_blank:
                     parts.append(f"{n_blank} blank")
                 self.add(
-                    5,
+                    9,
                     BLOCKER,
                     ext,
                     f"{' + '.join(parts)} active line(s) have an unmapped "
                     f"Sales Item (those lines will be skipped).",
                 )
 
-    def check_6_deal_alignment(self):
-        """Check 6 (WARNING): every deal has both a BA and a subscription.
-
-        Compares the set of deal ids seen in the subscription groups against the
-        set seen in the BA rows (both reduced via ``_deal_id`` — the token before
-        the first underscore). Warns for each deal that has subs but no BA row
-        (the sub loads with no billing-account reference) and for each deal with
-        a BA but no sub (an orphan BA). Warning, not blocker — the load can still
-        proceed. Catches the Care Shield gap. NOTE: if the BA CSV is missing
-        entirely, every sub deal trips this warning.
-        """
-        sub_deals = {_deal_id(e) for e in self.sub_groups}
-        ba_deals = {
-            _deal_id((r.get("externalId") or "").strip()) for r in (self.bas or [])
-        }
-        for d in sorted(sub_deals - ba_deals):
-            self.add(6, WARNING, d, "deal has subscription(s) but no BA row.")
-        for d in sorted(ba_deals - sub_deals):
-            self.add(6, WARNING, d, "deal has a BA row but no subscription.")
-
-    def check_7_price_plan(self):
-        """Check 7 (WARNING): each line's price plan exists in NS.
+    def check_10_price_plan(self):
+        """Check 10 (WARNING): each line's price plan exists in NS.
 
         For every included line carrying a ``Price Plan External ID``, applies
         the load revision and checks the result against the price plans found in
@@ -1020,21 +980,21 @@ class Validator:
                 rev_pp = config.apply_revision(raw_pp)
                 if rev_pp not in self.ns_priceplans:
                     self.add(
-                        7,
+                        10,
                         WARNING,
                         ext,
                         f"Price Plan {rev_pp!r} not in NS; line will fall "
                         f"back to book default.",
                     )
 
-    def check_7_1_price_plan_csv(self):
-        """Check 7.1 (WARNING): each line's price plan exists in the pricing CSV.
+    def check_11_price_plan_csv(self):
+        """Check 11 (WARNING): each line's price plan exists in the pricing CSV.
 
-        Companion to check 7. Check 7 asks "is the price plan already in NS?";
+        Companion to check 10. Check 10 asks "is the price plan already in NS?";
         this asks "is it in the pricing CSV (``PRICE_PLAN_EXTERNAL_ID``), i.e.
         can it be CREATED?". Both use the RAW external id (the pricing CSV and
         the sub column are raw; NS stores the revisioned form). Reading the two
-        together: a plan missing from NS (7) but present in the CSV (7.1 clean)
+        together: a plan missing from NS (10) but present in the CSV (11 clean)
         is resolvable — run the pricePlan load and it lands in NS. A plan missing
         from BOTH is the real gap this surfaces: there is no source row to push,
         so the line can only ever fall back to the book default. Blank price-plan
@@ -1063,7 +1023,7 @@ class Validator:
             if (row.get("Lines: Include") or "").strip() == "T"
         ):
             self.add(
-                7.1,
+                11,
                 WARNING,
                 "(pricing CSV)",
                 f"pricing CSV {config.PRICE_PLANS_CSV!r} contains no price-plan "
@@ -1092,7 +1052,7 @@ class Validator:
         n_have = len(self.pricing_csv_extids)
         if referenced and missing and n_have >= self.UNSCOPED_RATIO * len(referenced):
             self.add(
-                7.1,
+                11,
                 WARNING,
                 "(pricing CSV scope)",
                 f"pricing CSV holds {n_have} plans for only {len(referenced)} "
@@ -1104,22 +1064,22 @@ class Validator:
 
         for ext, raw_pp in missing:
             self.add(
-                7.1,
+                11,
                 WARNING,
                 ext,
                 f"Price Plan {raw_pp!r} referenced by sub line but not in "
                 f"the pricing CSV; it cannot be created/pushed to NS.",
             )
 
-    def check_8_addresses(self):
-        """Check 8 (BLOCKER): each BA's customer has default bill+ship addresses.
+    def check_12_addresses(self):
+        """Check 12 (BLOCKER): each BA's customer has default bill+ship addresses.
 
         The BA loader resolves ``billAddressList`` / ``shipAddressList`` from the
         customer's default billing and shipping addresses; if either is missing
         the BA is skipped. So for each BA, this blocks when its NS customer lacks
         a default billing and/or shipping address (per ``customeraddressbook``).
         BAs whose customer wasn't found in NS are skipped here — already flagged
-        by check 2.
+        by check 5.
         """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
@@ -1138,15 +1098,15 @@ class Validator:
                 name = self.ext2_to_name.get(cust_ext)
                 who = f"{name!r} ({cust_ext})" if name else f"{cust_ext}"
                 self.add(
-                    8,
+                    12,
                     BLOCKER,
                     ba_ext,
                     f"customer {who} (id {cid}) has no default "
                     f"{' and '.join(missing)} address in NS; BA load skips.",
                 )
 
-    def check_9_required_fields(self):
-        """Check 9 (BLOCKER): required BA fields are present.
+    def check_13_required_fields(self):
+        """Check 13 (BLOCKER): required BA fields are present.
 
         Guards against silent skips by blocking any BA whose ``subsidiary_id`` or
         ``currency_id`` is blank — both are mandatory NS references the loader
@@ -1156,21 +1116,21 @@ class Validator:
             ba_ext = (r.get("externalId") or "").strip()
             for field in ("subsidiary_id", "currency_id"):
                 if not (r.get(field) or "").strip():
-                    self.add(9, BLOCKER, ba_ext, f"BA {field} is blank.")
+                    self.add(13, BLOCKER, ba_ext, f"BA {field} is blank.")
 
-    def check_10_extid_shape(self):
-        """Check 10 (WARNING): BA externalId follows the ``<deal_id>_BA`` shape.
+    def check_14_extid_shape(self):
+        """Check 14 (WARNING): BA externalId follows the ``<deal_id>_BA`` shape.
 
         Sanity-checks the naming convention by warning when a BA ``externalId``
-        doesn't end in ``_BA``. Since deal alignment (check 6) and the subscription
-        loader's shared-BA key both derive the deal id from this shape, drift
-        here would quietly misalign BAs and subs. Warning only.
+        doesn't end in ``_BA``. The subscription loader's shared-BA key derives
+        the deal id from this shape, so drift here would quietly misalign BAs and
+        subs. Warning only.
         """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             if not ba_ext.endswith("_BA"):
                 self.add(
-                    10,
+                    14,
                     WARNING,
                     ba_ext,
                     "BA externalId does not end in '_BA' (convention drift).",
@@ -1186,11 +1146,10 @@ class Validator:
                 None to run the whole catalog.
 
         Only the NS queries required by the active checks are issued — e.g. the
-        customer map is fetched only if any of checks 1/2/3/8 are in scope, the
-        C-name map only for check 1.1, etc. — each as one batched, chunked
-        SuiteQL call. Checks are then dispatched in sorted order so 1.1 runs
-        right after 1. Returns ``self.findings`` (also kept on the instance for
-        ``report``).
+        customer maps are fetched only if a customer-touching check is in scope,
+        the company-name map only for check 4, etc. — each as one batched,
+        chunked SuiteQL call. Checks are dispatched in ascending number order.
+        Returns ``self.findings`` (also kept on the instance for ``report``).
         """
         active_checks = [
             n
@@ -1199,15 +1158,15 @@ class Validator:
         ]
 
         # Prefetch NS data only for the checks we'll run. All customer-touching
-        # checks (1, 1.1, 2, 3, 8) now resolve via the single C-number map.
+        # checks resolve via the C-number / externalId maps.
         needs_customers = any(
-            c in active_checks for c in (1, 1.1, 1.2, 1.3, 2, 2.1, 3, 8)
+            c in active_checks for c in (1, 2, 3, 4, 5, 6, 7, 12)
         )
-        needs_names = 1.3 in active_checks
-        needs_cust_bas = 2.1 in active_checks
-        needs_priceplans = 7 in active_checks
-        needs_pricing_csv = 7.1 in active_checks
-        needs_addresses = 8 in active_checks
+        needs_names = 4 in active_checks
+        needs_cust_bas = 6 in active_checks
+        needs_priceplans = 10 in active_checks
+        needs_pricing_csv = 11 in active_checks
+        needs_addresses = 12 in active_checks
 
         if needs_customers:
             # Gather every C-number the in-scope checks might resolve: from the
@@ -1261,7 +1220,7 @@ class Validator:
             self._fetch_ns_by_ext(ext_ids)
 
         if needs_names:
-            # For check 1.3: NS lookup by exact company name (alias-resolved,
+            # For check 4: NS lookup by exact company name (alias-resolved,
             # uppercased) — the last-resort "is it in NS under a different id?".
             names = set()
             for grp in self.sub_groups.values():
@@ -1272,7 +1231,7 @@ class Validator:
             self._fetch_ns_by_name(names)
 
         if needs_cust_bas:
-            # For check 2.1: which subs customers already have a Billing Account in
+            # For check 6: which subs customers already have a Billing Account in
             # NS. Resolve each subs customer to its NS internal id, then ask NS.
             cust_ids = set()
             for grp in self.sub_groups.values():
@@ -1302,7 +1261,7 @@ class Validator:
             pricing_rows = _read_csv(config.PRICE_PLANS_CSV)
             if pricing_rows is None:
                 print(
-                    f"  ⚠ pricing CSV not found, skipping check 7.1: "
+                    f"  ⚠ pricing CSV not found, skipping check 11: "
                     f"{config.PRICE_PLANS_CSV}"
                 )
             else:
@@ -1330,20 +1289,19 @@ class Validator:
 
         dispatch = {
             1: self.check_1_sub_customer,
-            1.1: self.check_1_1_customer_in_env,
-            1.2: self.check_1_2_customer_load_status,
-            1.3: self.check_1_3_customer_name_in_ns,
-            2: self.check_2_ba_customer,
-            2.1: self.check_2_1_subs_customer_has_ba,
-            3: self.check_3_subsidiary,
-            4: self.check_4_startdates,
-            5: self.check_5_sales_item,
-            6: self.check_6_deal_alignment,
-            7: self.check_7_price_plan,
-            7.1: self.check_7_1_price_plan_csv,
-            8: self.check_8_addresses,
-            9: self.check_9_required_fields,
-            10: self.check_10_extid_shape,
+            2: self.check_2_subs_cnumber_valid,
+            3: self.check_3_customer_load_status,
+            4: self.check_4_customer_name_in_ns,
+            5: self.check_5_ba_customer,
+            6: self.check_6_subs_customer_has_ba,
+            7: self.check_7_subsidiary,
+            8: self.check_8_startdates,
+            9: self.check_9_sales_item,
+            10: self.check_10_price_plan,
+            11: self.check_11_price_plan_csv,
+            12: self.check_12_addresses,
+            13: self.check_13_required_fields,
+            14: self.check_14_extid_shape,
         }
         for n in active_checks:
             # Missing-input guard (uniform across all checks): if a required CSV
@@ -1409,7 +1367,7 @@ class Validator:
                 current_group = group
             items = by_check.get(n, [])
             if items:
-                # A check may emit mixed severities (e.g. 1.1): blocker wins.
+                # A check may emit mixed severities (e.g. check 1): blocker wins.
                 mark = "✗" if any(i.severity == BLOCKER for i in items) else "⚠"
             else:
                 mark = "✓"
