@@ -23,6 +23,7 @@ Usage:
 Environment variables for credentials (or edit config.py):
   NS_CONSUMER_KEY, NS_CONSUMER_SECRET, NS_ACCESS_TOKEN, NS_TOKEN_SECRET, NS_REALM
 """
+
 import argparse
 import json
 import logging
@@ -593,7 +594,9 @@ def print_report(
     """
     report_logger = logging.getLogger("report")
     rev_filter = None if all_revisions else config.LOAD_REVISION
-    scope_label = "ALL revisions" if all_revisions else f"revision {config.LOAD_REVISION!r}"
+    scope_label = (
+        "ALL revisions" if all_revisions else f"revision {config.LOAD_REVISION!r}"
+    )
 
     lines = []
     lines.append("\n" + "=" * 70)
@@ -767,13 +770,12 @@ def write_revision_status(
                 )
                 continue
             parts = [
-                f"{k}={result.get(k, 0)}" for k in ("success", "failed", "skipped")
+                f"{k}={result.get(k, 0)}"
+                for k in ("success", "failed", "skipped")
                 if k in result
             ]
             total = result.get("total", 0)
-            lines.append(
-                f"  {entity:18s} total={total}  " + "  ".join(parts)
-            )
+            lines.append(f"  {entity:18s} total={total}  " + "  ".join(parts))
 
     # Cumulative revision state across all 5 entities
     lines.append(f"Revision {rev} cumulative:")
@@ -833,7 +835,7 @@ def _run(args, logger, log_file: str):
         v_code = run_validation(entities, client=client)
 
         # Pricing coverage gate — only when subscriptions are in scope. The
-        # validator's check 7.1 reports uncovered price plans as WARNINGS (the
+        # validator's check 11 reports uncovered price plans as WARNINGS (the
         # load still proceeds); this gate FAILS the --validate run on the same
         # condition, because an uncovered plan means the sub line silently loads
         # against the £0 price-book default. Reads only the local CSVs (no NS
