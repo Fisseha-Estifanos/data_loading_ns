@@ -133,18 +133,18 @@ python check_pricing_coverage.py       # PASS only if every sub-referenced plan 
 #     customer CSV's "C-number" column / the subs' NETSUITE_ACCOUNT_NUMBER*),
 #     NOT by External ID 2 (a HubSpot id absent from NS). In the validate report,
 #     under "CUSTOMERS — subscription resolves to an NS customer":
-#       • Check 1.2 lists, per customer, which are already in NS (skip — do NOT
+#       • Check 3 lists, per customer, which are already in NS (skip — do NOT
 #         load) vs which are NOT in NS and must be created/loaded first.
-#       • Check 1.3 splits the "not resolvable by id" ones into "truly absent
+#       • Check 4 splits the "not resolvable by id" ones into "truly absent
 #         (create it)" vs "in NS under a different id (reconcile, don't dup)".
 #       • Only load (step 5 customer) the customers flagged NOT in NS.
 
 # 4c. DECIDE which billing accounts to load / create. Under the validate report's
 #     "BILLING ACCOUNTS — subs customer already has one in NS" section:
-#       • Check 2.1 asks NS directly whether each subs customer already has a
+#       • Check 6 asks NS directly whether each subs customer already has a
 #         Billing Account. Load BAs (step 5 billingAccount) only for customers
 #         that don't — strip the rest from the billing CSV.
-#       • Check 2.1 WARNS for any customer with NO BA in NS AND none in the
+#       • Check 6 WARNS for any customer with NO BA in NS AND none in the
 #         billing CSV — its sub would be unbilled. Create those in step 5b.
 
 # 5. LOAD in dependency order. Dry-run each first, then the live run.
@@ -152,7 +152,7 @@ python main.py --dry-run --entity customer        && python main.py --entity cus
 python main.py --entity customer --patch-eer       # link Electronic Email Recipients (2nd step)
 python main.py --dry-run --entity billingAccount  && python main.py --entity billingAccount
 
-# 5b. CREATE billing accounts for the gap customers Check 2.1 flagged (no BA in
+# 5b. CREATE billing accounts for the gap customers Check 6 flagged (no BA in
 #     NS and none in the billing CSV). Derives the address from the customer's NS
 #     address book and the rest from the subscription; resolves the customer by
 #     C-number (no state-tracker seeding needed). Dry-run first.
