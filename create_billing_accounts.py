@@ -1,7 +1,7 @@
 """
 create_billing_accounts.py — synthesize BAs for subs customers that have NONE
 =============================================================================
-Operator-invoked. Fills the gap check 2.1 flags: a subscription customer with
+Operator-invoked. Fills the gap check 6 flags: a subscription customer with
 **no Billing Account in NS AND none in the billing CSV** — its sub would load
 unbilled. For each such deal it CREATES a Billing Account in NS, deriving the
 billing address from the customer's NS address book and the rest from the
@@ -79,7 +79,7 @@ def build_payloads(v: Validator, bill_map: dict, ship_map: dict):
 
     A gap deal = a subscription deal with NO billing-account row in the billing
     CSV whose customer has NO billing account in NS (``ns_cust_has_ba``) — i.e.
-    exactly check 2.1's "neither" case, at deal granularity. ``skips`` collects
+    exactly check 6's "neither" case, at deal granularity. ``skips`` collects
     (deal, reason) for deals we deliberately don't create, so nothing is silent.
     """
     ba_deals = {_deal_id((r.get("externalId") or "").strip()) for r in (v.bas or [])}
