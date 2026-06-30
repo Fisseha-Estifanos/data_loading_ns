@@ -212,12 +212,12 @@ python main.py --dry-run --entity billingAccount && python main.py --entity bill
 ```
 
 For customers with **no** BA in NS **and none** in the billing CSV (flagged by
-Check 6), create one from the customer's NS address book — resolves the customer by
-C-number, no state-tracker seeding:
+Check 6), the BA loader can synthesize one from the customer's NS address book +
+the subscription — resolving the customer by C-number, no seeding:
 
 ```bash
-python create_billing_accounts.py           # dry-run — prints the BAs it would create
-python create_billing_accounts.py --apply    # POST them
+python main.py --dry-run --entity billingAccount --create-missing-bas   # preview the BAs
+python main.py --entity billingAccount --create-missing-bas             # create them
 ```
 
 > A deal skipped for "no default billing/shipping address" needs its customer
@@ -261,18 +261,21 @@ isn't loaded, the child is skipped with a logged error.
 
 The pipeline is identical. These are the only environment-specific realities:
 
-| #   | Aspect          | Sandbox                            | Production                                                                                                                                                                                                                 |
-| --- | --------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **Env file**    | `source .env`                      | `source .env.prod`                                                                                                                                                                                                         |
-| 2   | **State DB**    | `state/load_state.db`              | `state/load_state_prod.db` — **never cross them.** The DB stores NS *internal* IDs that only mean something in their own account; a sandbox DB used against prod would wire prod records to sandbox internal IDs           |
-| 3   | **Customers**   | Loaded fresh (`--entity customer`) | **Already exist** in NS under their **raw** `External ID 2` (no `_rvn` suffix). Do **not** load them — seed the existing internal ID into the state DB instead (see below), then load BA / pricePlan / subscription on top |
-| 4   | **Addresses**   | Loaded with the customer           | Prod customers may lack a default billing+shipping address; the BA load *skips* without one. Check and patch first (see below)                                                                                             |
-| 5   | **Permissions** | Usually open                       | Role needs SuiteBilling Full grants (see setup)                                                                                                                                                                            |
+| # | Aspect | Sandbox | Production |
+| --- | --- | --- | --- |
+| 1 | **Env file** | `source .env` | `source .env.prod` |
+| 2 | **State DB** | `state/load_state.db` | `state/load_state_prod.db` — **never cross them.** The DB stores NS *internal* IDs that only mean something in their own account; a sandbox DB used against prod would wire prod records to sandbox internal IDs |
+| 3 | **Customers** | Loaded fresh (`--entity customer`) | **Already exist** in NS. Do **not** load them — the BA/subscription loaders resolve them by **C-number** straight from NS (no seeding), so just leave them out of the customer CSV and load BA / pricePlan / subscription on top |
+| 4 | **Addresses** | Loaded with the customer | Prod customers may lack a default billing+shipping address; the BA load *skips* without one. Check and patch first (see below) |
+| 5 | **Permissions** | Usually open | Role needs SuiteBilling Full grants (see setup) |
 
 ### Prod-only extra steps (when the customer already exists)
 
-For a prod load where the customer is already live in NS, run these after Step 6
-(Validate) and before Step 8 (Load), **per deal**:
+Pre-existing customers are now resolved **by C-number straight from NS** (no
+seeding) — so a prod load needs nothing special for *resolution*; just leave those
+customers out of the customer CSV (don't load them). The only prod-specific care
+is **addresses**: a billing account needs the customer to have a default
+billing + shipping address, so check and patch first, **per deal**:
 
 ```bash
 # Full readiness check for the deal (customer exists? BA? price plan/item resolve?)
@@ -282,22 +285,14 @@ python prod/prod_check.py sub-readiness --deal <sub_externalId> --c-number <C-nu
 python prod/prod_check.py address --customer-id <internal_id>
 python prod/patch_customer_address.py --customer-id <id> --from-csv --company-name "<NAME>"          # dry-run
 python prod/patch_customer_address.py --customer-id <id> --from-csv --company-name "<NAME>" --apply
-
-# Seed the existing customer's internal ID into the state DB so sub/BA link to it
-python prod/seed_state.py --company-name "<NAME>" --netsuite-id <internal_id>                        # dry-run
-python prod/seed_state.py --company-name "<NAME>" --netsuite-id <internal_id> --apply
 ```
 
-Then run Step 8 **without** `--entity customer` (it's seeded, not loaded).
+Then run Step 8 **without** `--entity customer` (they already exist in NS).
 
 > **externalId match (gotcha):** the subscription looks for billing account
 > `<sub externalId>_BA`. If the sub externalId is `495006175463_27396`, the
 > billing CSV `externalId` must be `495006175463_27396_BA` — edit the cell if the
 > export emits just `495006175463_BA`.
-
-> The state-DB seeding dance is being removed — see
-> [`refactors/REFACTOR-PLAN.md`](refactors/REFACTOR-PLAN.md) WS2 (replace SQLite
-> with live NS reconciliation). Until that ships, the steps above are current.
 
 ---
 
@@ -305,7 +300,8 @@ Then run Step 8 **without** `--entity customer` (it's seeded, not loaded).
 
 1. **Separate state DB per environment** — see table #2 above. The #1 way to
    corrupt a prod load.
-2. **The customer often already exists in prod.** Don't re-create it — seed it.
+2. **The customer often already exists in prod.** Don't re-create it — leave it
+   out of the customer CSV; the BA/subscription loaders resolve it by C-number.
 3. **The billing account needs the customer to have a default address.** The BA
    loader pulls `billAddressList`/`shipAddressList` from the customer's default
    billing+shipping address; no address → BA skipped.
@@ -323,20 +319,21 @@ Then run Step 8 **without** `--entity customer` (it's seeded, not loaded).
 
 ## CLI reference — `main.py`
 
-| Flag                   | Values                                                          | Description                                                                                                                                         |
-| ---------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--entity`             | `customer` `billingAccount` `pricePlan` `subscription` `oneOff` | Load only this entity. Omit to run all five in dependency order.                                                                                    |
-| `--validate`           | —                                                               | Read-only pre-load validator. Reports every data problem at once; exits non-zero on blockers. Respects `--entity`. **Run before every load.**       |
-| `--dry-run`            | —                                                               | Build and log payloads without any API calls.                                                                                                       |
-| `--limit N`            | integer                                                         | Process only the first N records (test a single POST).                                                                                              |
-| `--report`             | —                                                               | Print the load-state summary (counts per status per entity). Scoped to the active `LOAD_REVISION`.                                                  |
-| `--failures`           | —                                                               | Add failure details to `--report`. Use with `--report`.                                                                                             |
-| `--all-revisions`      | —                                                               | Make `--report` span all revisions instead of just the active one.                                                                                  |
-| `--field-map`          | —                                                               | Print the CSV column → NS API field mapping for all loaders. No creds needed.                                                                       |
-| `--skip-preflight`     | —                                                               | Skip the auth connectivity check at startup.                                                                                                        |
-| `--patch`              | —                                                               | **Retroactive only.** PATCH already-loaded customers with custom fields. Not needed for new loads (fields are in `build_payload()`). Customer only. |
-| `--patch-eer`          | —                                                               | Link `custentity_zellis_elec_email_recipients` (two-step POST+PATCH). Run after `--entity customer`.                                                |
-| `--patch-ba-startdate` | —                                                               | PATCH billing-account startDates from the CSV where they differ from NS. Use with `--entity billingAccount`.                                        |
+| Flag | Values | Description |
+| --- | --- | --- |
+| `--entity` | `customer` `billingAccount` `pricePlan` `subscription` `oneOff` | Load only this entity. Omit to run all five in dependency order. |
+| `--validate` | — | Read-only pre-load validator. Reports every data problem at once; exits non-zero on blockers. Respects `--entity`. **Run before every load.** |
+| `--dry-run` | — | Build and log payloads without any API calls. |
+| `--limit N` | integer | Process only the first N records (test a single POST). |
+| `--report` | — | Print the load-state summary (counts per status per entity). Scoped to the active `LOAD_REVISION`. |
+| `--failures` | — | Add failure details to `--report`. Use with `--report`. |
+| `--all-revisions` | — | Make `--report` span all revisions instead of just the active one. |
+| `--field-map` | — | Print the CSV column → NS API field mapping for all loaders. No creds needed. |
+| `--skip-preflight` | — | Skip the auth connectivity check at startup. |
+| `--patch` | — | **Retroactive only.** PATCH already-loaded customers with custom fields. Not needed for new loads (fields are in `build_payload()`). Customer only. |
+| `--patch-eer` | — | Link `custentity_zellis_elec_email_recipients` (two-step POST+PATCH). Run after `--entity customer`. |
+| `--patch-ba-startdate` | — | PATCH billing-account startDates from the CSV where they differ from NS. Use with `--entity billingAccount`. |
+| `--create-missing-bas` | — | Create BAs for subscription customers with no BA (none in NS, none in the billing CSV) from the customer's NS address book + the subscription. Honours `--dry-run`. Use with `--entity billingAccount`. |
 
 ## Read-only inspector — `prod/prod_check.py`
 

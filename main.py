@@ -717,6 +717,17 @@ def main():
             "Use with --entity billingAccount."
         ),
     )
+    parser.add_argument(
+        "--create-missing-bas",
+        action="store_true",
+        help=(
+            "Create billing accounts for subscription customers that have NONE "
+            "(no BA in NS and none in the billing CSV), derived from the "
+            "customer's NS address book + the subscription. Resolves the customer "
+            "by C-number (no seeding). Honours --dry-run. Use with "
+            "--entity billingAccount."
+        ),
+    )
     args = parser.parse_args()
 
     log_file = setup_logging()
@@ -919,6 +930,29 @@ def _run(args, logger, log_file: str):
                 "=" * 70,
             ]
             for key in ("total", "patched", "skipped", "failed"):
+                if key in result:
+                    lines.append(f"    {key:20s}: {result[key]}")
+            lines.append("=" * 70)
+            logger.info("\n".join(lines))
+            return
+
+        # ── Create missing billing accounts (from the address book) ──────
+        if args.create_missing_bas:
+            if args.entity and args.entity != "billingAccount":
+                logger.error(
+                    "--create-missing-bas only supports --entity billingAccount"
+                )
+                sys.exit(1)
+            loader = BillingAccountLoader(client, tracker)
+            result = loader.create_missing(dry_run=args.dry_run)
+            lines = [
+                "\n" + "=" * 70,
+                "  CREATE MISSING BILLING ACCOUNTS"
+                + ("  (DRY RUN)" if result.get("dry_run") else "")
+                + " — SUMMARY",
+                "=" * 70,
+            ]
+            for key in ("total", "created", "failed", "skipped"):
                 if key in result:
                     lines.append(f"    {key:20s}: {result[key]}")
             lines.append("=" * 70)
