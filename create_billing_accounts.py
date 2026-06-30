@@ -116,7 +116,11 @@ def build_payloads(v: Validator, bill_map: dict, ship_map: dict):
         if not currency_id:
             skips.append((deal, f"currency {currency_name!r} not in CURRENCY_MAP"))
             continue
-        frequency = v._group_value(rows, "PRICE_BOOK_FREQUENCY")
+        # NS's frequency.id is the UPPER-CASE enum ("MONTHLY") — that's what the
+        # billing CSV carries and what every successful BA load sends. The subs'
+        # PRICE_BOOK_FREQUENCY is mixed-case ("Monthly"), so normalise the case to
+        # match the NS enum (the only transform; value itself is unchanged).
+        frequency = v._group_value(rows, "PRICE_BOOK_FREQUENCY").upper()
         if not frequency:
             skips.append((deal, "PRICE_BOOK_FREQUENCY is blank (won't invent one)"))
             continue
