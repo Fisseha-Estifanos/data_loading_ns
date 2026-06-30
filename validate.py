@@ -53,6 +53,7 @@ CHECK_ENTITY = {
     1: "subscription",
     1.1: "subscription",
     1.2: "subscription",
+    1.3: "subscription",
     2: "billingAccount",
     3: "subscription",
     4: "billingAccount",
@@ -86,6 +87,7 @@ CHECK_REQUIRED_CSVS = {
     1: {"subscription", "customer"},
     1.1: {"subscription"},
     1.2: {"subscription", "customer"},
+    1.3: {"subscription", "customer"},
     2: {"billingAccount"},
     3: {"subscription", "customer"},
     4: {"subscription", "billingAccount"},
@@ -106,6 +108,7 @@ CHECK_GROUP = {
     1: "CUSTOMERS — subscription resolves to an NS customer",
     1.1: "CUSTOMERS — subscription resolves to an NS customer",
     1.2: "CUSTOMERS — subscription resolves to an NS customer",
+    1.3: "CUSTOMERS — subscription resolves to an NS customer",
     2: "BILLING ACCOUNTS — customer link",
     3: "SUBSCRIPTIONS — subsidiary match",
     4: "BILLING ACCOUNTS — start dates",
@@ -122,6 +125,7 @@ CHECK_TITLE = {
     1: "Sub customer resolves to an NS customer (by C-number)",
     1.1: "Sub customer's C-number is in the subs export AND exists in NS",
     1.2: "Sub customer already in NS (skip load) vs must be created (load)",
+    1.3: "Flagged customer: truly absent from NS vs in NS under a different id",
     2: "BA customer resolves to an NS customer (by C-number via customer CSV)",
     3: "Sub subsidiary == its customer's NS subsidiary",
     4: "BA startDate present and <= earliest sub Start Date for the deal",
@@ -146,6 +150,9 @@ CHECK_EXPLAIN = {
     1.2: "Per distinct customer: already in NS (skip — don't load it) or NOT in "
     "NS (must be created/loaded first). Warns only on the ones to create; clean "
     "= every sub customer already exists in NS.",
+    1.3: "For customers 1.2 couldn't resolve by id: is one in NS by company name "
+    "anyway? Separates 'truly absent — create it' from 'in NS but the C-number / "
+    "External ID 2 bridge failed — reconcile, don't duplicate'.",
     2: "Does each billing account point at a real NS customer? Bridges its "
     "MP_HubSpot id → customers CSV → C-number → NS.",
     3: "Does each sub's Subsidiary match its NS customer's subsidiary? A mismatch "
@@ -358,6 +365,9 @@ class Validator:
         #     {id, subsidiary, externalid, companyname, entityid}.
         self.ns_by_cnum: dict[str, dict] = {}
         self.ns_by_ext: dict[str, dict] = {}
+        # UPPER(companyname) → record. Last-resort lookup for check 1.3 only:
+        # tells "truly absent from NS" apart from "in NS but the id bridge failed".
+        self.ns_by_name: dict[str, dict] = {}
         self.ns_priceplans: set[str] = set()  # revisioned extIds that exist
         self.pricing_csv_extids: set[str] = set()  # RAW extIds in the pricing CSV
         self.addr_billing: set[str] = set()  # customer internal ids w/ default bill
@@ -466,6 +476,32 @@ class Validator:
                     "companyname": row.get("companyname"),
                     "entityid": row.get("entityid"),
                 }
+
+    def _fetch_ns_by_name(self, names):
+        """Resolve customers in NS by exact (case-insensitive) company name.
+
+        Populates ``self.ns_by_name`` ({UPPER(companyname) → {id, entityid,
+        externalid, companyname}}) for check 1.3's last-resort lookup. ``names``
+        are already alias-resolved and uppercased by the caller. EXACT upper
+        match (``WHERE UPPER(companyname) IN (...)``) — deliberately no fuzzy
+        matching, so a hit is trustworthy; a miss means "not found by exact
+        name" (NS may still hold it under a different spelling).
+        """
+        ids = sorted({n for n in names if n})
+        for chunk in _chunk(ids):
+            q = (
+                "SELECT id, entityid, externalid, companyname FROM customer "
+                f"WHERE UPPER(companyname) IN ({_sql_in(chunk)})"
+            )
+            for row in self.client.suiteql_query(q):
+                key = (row.get("companyname") or "").strip().upper()
+                if key:
+                    self.ns_by_name[key] = {
+                        "id": row.get("id"),
+                        "entityid": row.get("entityid"),
+                        "externalid": row.get("externalid"),
+                        "companyname": row.get("companyname"),
+                    }
 
     def customer_ns_record(self, cnum: str, ext2: str):
         """The NS customer record for (C-number, External ID 2), or None.
@@ -655,6 +691,54 @@ class Validator:
                     f"customer {name!r}: NOT in NS — must be created/loaded before "
                     f"its subscription (otherwise the sub is skipped at load). "
                     f"Customers not listed here already exist in NS (skip load).",
+                )
+
+    def check_1_3_customer_name_in_ns(self):
+        """Check 1.3 (WARNING): for customers UNRESOLVED by id, is one in NS by name?
+
+        The companion to 1.2 that tells two very different situations apart, for
+        each customer that could NOT be resolved by C-number or externalId:
+          • a customer with that company name EXISTS in NS → it IS in NS; only the
+            id bridge (C-number / External ID 2) failed. Do NOT create a
+            duplicate — reconcile the identifiers. Reports the NS id / entityid /
+            externalid so the operator can fix the mapping.
+          • no NS customer with that exact name → genuinely absent; create/load it.
+        Only customers 1.2 would flag are considered (resolved-by-id ones are
+        skipped). EXACT (case-insensitive) name match — see _fetch_ns_by_name.
+        """
+        resolved_by_id: dict[str, bool] = {}
+        for ext, grp in self.sub_groups.items():
+            name = (grp[0].get("Customer") or "").strip()
+            if not name:
+                continue
+            rec = self.customer_ns_record(
+                self.sub_cnum(grp), self.resolve_customer_ext(name)
+            )
+            resolved_by_id[name] = resolved_by_id.get(name, False) or (rec is not None)
+        for name, by_id in sorted(resolved_by_id.items()):
+            if by_id:
+                continue  # in NS by id — fine (check 1 / 1.2 cover it)
+            alias = config.CUSTOMER_NAME_ALIASES.get(name.upper(), name).upper()
+            hit = self.ns_by_name.get(alias)
+            if hit:
+                self.add(
+                    1.3,
+                    WARNING,
+                    name,
+                    f"customer {name!r}: NOT resolvable by C-number/externalId, but "
+                    f"a customer named {hit.get('companyname')!r} EXISTS in NS "
+                    f"(id {hit.get('id')}, entityid {hit.get('entityid')}, "
+                    f"externalid {hit.get('externalid')!r}). It IS in NS — reconcile "
+                    f"its C-number / External ID 2; do NOT create a duplicate.",
+                )
+            else:
+                self.add(
+                    1.3,
+                    WARNING,
+                    name,
+                    f"customer {name!r}: not in NS by C-number, externalId, OR exact "
+                    f"company name — genuinely absent. Create/load it (if you "
+                    f"expected it to exist, check the NS name spelling).",
                 )
 
     def check_2_ba_customer(self):
@@ -1038,7 +1122,8 @@ class Validator:
 
         # Prefetch NS data only for the checks we'll run. All customer-touching
         # checks (1, 1.1, 2, 3, 8) now resolve via the single C-number map.
-        needs_customers = any(c in active_checks for c in (1, 1.1, 1.2, 2, 3, 8))
+        needs_customers = any(c in active_checks for c in (1, 1.1, 1.2, 1.3, 2, 3, 8))
+        needs_names = 1.3 in active_checks
         needs_priceplans = 7 in active_checks
         needs_pricing_csv = 7.1 in active_checks
         needs_addresses = 8 in active_checks
@@ -1094,6 +1179,17 @@ class Validator:
             )
             self._fetch_ns_by_ext(ext_ids)
 
+        if needs_names:
+            # For check 1.3: NS lookup by exact company name (alias-resolved,
+            # uppercased) — the last-resort "is it in NS under a different id?".
+            names = set()
+            for grp in self.sub_groups.values():
+                nm = (grp[0].get("Customer") or "").strip()
+                if nm:
+                    names.add(config.CUSTOMER_NAME_ALIASES.get(nm.upper(), nm).upper())
+            print(f"  · querying NS for {len(names)} customer company names…")
+            self._fetch_ns_by_name(names)
+
         if needs_priceplans:
             rev_pps = set()
             for grp in self.sub_groups.values():
@@ -1140,6 +1236,7 @@ class Validator:
             1: self.check_1_sub_customer,
             1.1: self.check_1_1_customer_in_env,
             1.2: self.check_1_2_customer_load_status,
+            1.3: self.check_1_3_customer_name_in_ns,
             2: self.check_2_ba_customer,
             3: self.check_3_subsidiary,
             4: self.check_4_startdates,
