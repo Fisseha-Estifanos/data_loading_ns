@@ -65,114 +65,177 @@ price-plan/subscription loads. Get Adam to grant these up front.
 
 ## The standard load sequence
 
-Run from the repo root. This is the canonical hierarchy — the same in both
-environments. The **only** change between sandbox and prod is which env file you
-source in step 1 (plus the prod extras in [§ Sandbox vs Prod](#sandbox-vs-prod)).
+One pipeline, two environments — the only difference is which env file you source
+in **Step 1** (plus the prod-only extras in [§ Sandbox vs Prod](#sandbox-vs-prod)).
+Run everything from the repo root (`data_loading/`).
 
-**Pricing prep — canonical order** (when the Snowflake exports are bulk dumps):
+**Pricing prep, in order** — when the Snowflake exports are bulk dumps rather than
+batch-scoped:
 
 ```text
-proper batch-scoped pricing CSV  →  filter_to_subs.py  →  dedup_price_plans.py  →  main.py --validate  →  load
+batch-scoped pricing CSV → filter_to_subs.py → dedup_price_plans.py → main.py --validate → load
 ```
 
-Each arrow maps to a step below (3 → 3b → 3c → 4 → 5). The order matters:
-`filter_to_subs.py` trims every dependency CSV down to this batch first; then
-`dedup_price_plans.py` collapses what remains by pricing shape; then `--validate`
-(incl. the pricing-coverage gate) must pass before you load.
+`filter_to_subs.py` (Step 4) trims every dependency CSV to this batch;
+`dedup_price_plans.py` (Step 5) then collapses what remains by pricing shape;
+`--validate` (Step 6, incl. the pricing-coverage gate) must pass before you load.
+
+### Step 1 — Choose the environment
+
+The only sandbox-vs-prod switch. Sourcing an env file sets the credentials, realm,
+and state DB.
 
 ```bash
-cd data_loading
-
-# 1. Pick the environment — this is the ONLY sb3-vs-prod switch.
-source .env          # sandbox
-#   …or…
-source .env.prod     # production
-
-# 2. Confirm you're pointed where you think you are (read-only).
-python prod/prod_check.py whoami        # prints SANDBOX or PRODUCTION + account id
-
-# 3. Point config.py *_CSV paths at the active Snowflake exports for this batch,
-#    and set config.LOAD_REVISION (the externalId suffix; currently _rvn_prod_01).
-
-# 3b. (OPTIONAL) Trim the dependency CSVs to ONLY what this batch's subs need.
-#     The customer / pricePlan / billing exports are bulk dumps that carry far
-#     more rows than the subs reference; without trimming, the load pushes data
-#     you don't want and validate flags problems for rows the subs never touch.
-#     This rewrites each file in place (timestamped .bak saved). Subs CSV is
-#     never modified. Preview first, then apply.
-python filter_to_subs.py --dry-run     # report what would be removed; writes nothing
-python filter_to_subs.py               # apply: trim in place, back up originals
-
-# 3c. (OPTIONAL, interim) De-duplicate price plans by pricing shape. A NS price
-#     plan has no item binding — plans with identical currency/type/tiers/min/max
-#     are the same plan; the item slug in the externalId is just a name. The full
-#     price book is ~6.7x duplicated (e.g. 20k rows → ~3k distinct). This collapses
-#     the pricing CSV to one row per distinct shape (item-free externalId
-#     MP_PP_<hash>) and re-points the subs' `Price Plan External ID` to match.
-#     Rewrites both files in place (.bak saved); idempotent. Inspect first:
-python analyze_priceplan_dedup.py --full   # report duplication (read-only, no creds)
-python dedup_price_plans.py --dry-run      # report what the rewrite would change
-python dedup_price_plans.py                # apply: dedupe pricing + remap subs refs
-#     NOTE: this is the "from here" stopgap; the proper fix moves the same shape
-#     hashing into the pricing + subs DDLs (and the loaders).
-
-# 4. VALIDATE — read-only, reports EVERY data problem at once. Run before every load.
-python main.py --validate
-#    Exits non-zero if blockers exist (name/key mismatches, subsidiary conflicts,
-#    blank/late BA start dates, unmapped sales items, missing addresses, ...).
-#    Resolve every ✗ before loading. Scope to one entity with --validate --entity <e>.
-#    When subscriptions are in scope, --validate also runs the PRICING COVERAGE
-#    GATE (below) and fails if any referenced price plan is missing from the
-#    pricing CSV. You can also run that gate on its own — no NS creds needed:
-python check_pricing_coverage.py       # PASS only if every sub-referenced plan is in the pricing CSV
-#    A FAIL here usually means the pricing export was generated UNSCOPED (the
-#    full price book, capped ~20k rows) instead of scoped to this batch's deals.
-#    filter_to_subs.py cannot fix it — re-run the pricing DDL scoped to the batch.
-
-# 4b. DECIDE which customers to load. Customers resolve to NS by C-number (the
-#     customer CSV's "C-number" column / the subs' NETSUITE_ACCOUNT_NUMBER*),
-#     NOT by External ID 2 (a HubSpot id absent from NS). In the validate report,
-#     under "CUSTOMERS — subscription resolves to an NS customer":
-#       • Check 3 lists, per customer, which are already in NS (skip — do NOT
-#         load) vs which are NOT in NS and must be created/loaded first.
-#       • Check 4 splits the "not resolvable by id" ones into "truly absent
-#         (create it)" vs "in NS under a different id (reconcile, don't dup)".
-#       • Only load (step 5 customer) the customers flagged NOT in NS.
-
-# 4c. DECIDE which billing accounts to load / create. Under the validate report's
-#     "BILLING ACCOUNTS — subs customer already has one in NS" section:
-#       • Check 6 asks NS directly whether each subs customer already has a
-#         Billing Account. Load BAs (step 5 billingAccount) only for customers
-#         that don't — strip the rest from the billing CSV.
-#       • Check 6 WARNS for any customer with NO BA in NS AND none in the
-#         billing CSV — its sub would be unbilled. Create those in step 5b.
-
-# 5. LOAD in dependency order. Dry-run each first, then the live run.
-python main.py --dry-run --entity customer        && python main.py --entity customer
-python main.py --entity customer --patch-eer       # link Electronic Email Recipients (2nd step)
-python main.py --dry-run --entity billingAccount  && python main.py --entity billingAccount
-
-# 5b. CREATE billing accounts for the gap customers Check 6 flagged (no BA in
-#     NS and none in the billing CSV). Derives the address from the customer's NS
-#     address book and the rest from the subscription; resolves the customer by
-#     C-number (no state-tracker seeding needed). Dry-run first.
-python create_billing_accounts.py            # DRY RUN — prints the BAs it would create
-python create_billing_accounts.py --apply     # POST them
-#     A deal skipped for "no default billing/shipping address" needs its customer
-#     address added first:  python repair_customer_addresses.py
-
-python main.py --dry-run --entity pricePlan       && python main.py --entity pricePlan
-python main.py --entity subscription               # includes lines AND prices the interval
-python main.py --entity oneOff
-
-# 6. VERIFY.
-python main.py --report --failures
-python prod/prod_check.py sub-intervals --sub-id <ID>   # confirm price landed on the interval
+source .env          # sandbox (4874529-sb3)
+# …or…
+source .env.prod     # production (4874529)
 ```
 
-Running `python main.py` with no `--entity` runs all five in this order
-automatically. The dry-run-then-live pairs above just give you a checkpoint at
-each step.
+### Step 2 — Confirm the target account
+
+A read-only sanity check before anything touches NetSuite.
+
+```bash
+python prod/prod_check.py whoami     # prints SANDBOX or PRODUCTION + account id
+```
+
+### Step 3 — Point config at this batch's exports
+
+Edit [`config.py`](config.py): set the `*_CSV` paths to the active Snowflake
+exports, and set `LOAD_REVISION` (the externalId suffix appended to every record;
+currently `_rvn_prod_01`). No command — just the edit.
+
+### Step 4 — *(Optional)* Trim dependency CSVs to this batch
+
+The customer / pricePlan / billing exports are often bulk dumps with far more rows
+than the subs reference. Trimming avoids loading unwanted records and silences
+validator findings for rows the subs never touch. Each file is rewritten in place
+(timestamped `.bak` saved); the subs CSV is never modified.
+
+```bash
+python filter_to_subs.py --dry-run    # preview what would be removed
+python filter_to_subs.py              # apply (backs up originals)
+```
+
+### Step 5 — *(Optional)* De-duplicate price plans
+
+A NS price plan has no item binding, so plans with identical
+currency / type / tiers / min-max are the *same* plan — the item slug in the
+externalId is just a label. The full price book is heavily duplicated (e.g. ~20k
+rows → ~3k distinct shapes). This collapses the pricing CSV to one row per distinct
+shape (item-free externalId `MP_PP_<hash>`) and re-points the subs'
+`Price Plan External ID` to match. Both files rewritten in place; idempotent.
+
+```bash
+python analyze_priceplan_dedup.py --full   # report duplication (read-only, no creds)
+python dedup_price_plans.py --dry-run       # preview the rewrite
+python dedup_price_plans.py                 # apply
+```
+
+> Interim stopgap. The proper fix moves the same shape-hashing into the pricing +
+> subs DDLs (and the loaders).
+
+### Step 6 — Validate
+
+Read-only; reports every data problem at once — name/key mismatches, subsidiary
+conflicts, blank/late BA start dates, unmapped sales items, missing addresses,
+price-plan coverage. **Run before every load and resolve every ✗ first.** Scope to
+one entity with `--entity`.
+
+```bash
+python main.py --validate
+python main.py --validate --entity subscription   # scope to one entity
+```
+
+When subscriptions are in scope, `--validate` also runs the pricing-coverage gate
+and fails if any referenced price plan is missing from the pricing CSV. You can run
+that gate standalone (no NS creds needed):
+
+```bash
+python check_pricing_coverage.py
+```
+
+A coverage FAIL usually means the pricing export was generated **unscoped** (the
+full price book, capped ~20k rows) instead of scoped to this batch — re-run the
+pricing DDL scoped to the batch (`filter_to_subs.py` can't fix it).
+
+#### The 14 checks at a glance
+
+**Blockers** exit non-zero and must be resolved before loading; **warnings** are
+informational and the load proceeds. *Reads* shows whether the check queries
+NetSuite (`NS`), the CSVs, or both. The report groups them under the banners shown
+in the *Group* column.
+
+| # | Check | Severity | Reads | Group | What it verifies (and why it matters) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Sub customer resolves to an NS customer | Blocker | NS + CSV | Customers | Each subscription's customer exists in NS — by C-number, or by the externalId it was loaded under. If not, the sub has no customer to attach to. |
+| 2 | Subs export's own C-number is valid in NS | Blocker | NS | Customers | The C-number the subs file itself carries (`NETSUITE_ACCOUNT_NUMBER*`) actually exists in NS — catches a wrong/stale account number even when check 1 resolved the customer another way. Silent if the subs carry no C-number. |
+| 3 | Already in NS (skip) vs must create (load) | Warning | NS | Customers | Per customer: already in NS → skip loading; not in NS → must be created first. Your load-vs-skip roster. |
+| 4 | Truly absent vs in NS under a different id | Warning | NS | Customers | For customers check 3 flagged: genuinely missing (create) vs already in NS under a mismatched id (reconcile — don't create a duplicate). |
+| 5 | BA customer resolves to an NS customer | Blocker | NS + CSV | Billing accounts | Each billing-account row points at a real NS customer (bridged via the customer CSV, or by the loaded externalId). |
+| 6 | Subs customer already has a BA in NS | Warning | NS + CSV | Billing accounts | Each subscription's customer has a Billing Account — already in NS, or one queued in the billing CSV. Warns when **neither** (its sub would be unbilled). |
+| 7 | Sub subsidiary == NS customer's subsidiary | Blocker | NS + CSV | Subscriptions | The sub's Subsidiary equals its NS customer's subsidiary. A mismatch is a hard NS 400 at load. |
+| 8 | BA startDate <= earliest sub Start Date | Blocker | CSV | Billing accounts | Each BA's startDate is present and on/before its earliest subscription start (a blank/late start breaks the subs it bills). |
+| 9 | Active sub line Sales Item is mapped | Blocker | CSV | Subscriptions | Every included sub line has a real Sales Item (not blank / not `NOT MAPPED`) — unmapped lines load silently short. |
+| 10 | Sub line Price Plan exists in NS | Warning | NS | Price plans | Each line's price plan already exists in NS, else the line falls back to the £0 book default. |
+| 11 | Sub line Price Plan exists in the pricing CSV | Warning | CSV | Price plans | Each line's price plan exists in the pricing CSV (i.e. *can* be created). Missing from both NS and CSV = no source row to push. |
+| 12 | BA customer has default billing AND shipping address | Blocker | NS | Billing accounts | Each BA's customer has both a default billing and shipping address in NS — the BA loader needs both or it skips the BA. |
+| 13 | BA required fields present | Blocker | CSV | Billing accounts | Each BA has `subsidiary_id` and `currency_id` filled (mandatory NS references). |
+| 14 | externalId shape sanity (`<deal_id>_BA`) | Warning | CSV | Billing accounts | Each BA externalId follows `<deal_id>_BA`; drift here quietly misaligns BAs and subs. |
+
+### Step 7 — Decide what to load
+
+The validate report tells you, per customer, exactly what to load vs skip.
+Customers resolve to NS by **C-number** (the customer CSV's `C-number` column / the
+subs' `NETSUITE_ACCOUNT_NUMBER*`), **not** by External ID 2 (a HubSpot id absent
+from NS).
+
+| Report check | Tells you | Action |
+| --- | --- | --- |
+| **Check 3** — already in NS vs must create | Which customers exist in NS (skip) vs which don't | Load only the customers flagged **NOT in NS** |
+| **Check 4** — truly absent vs different id | Whether a flagged customer is genuinely missing or has a mismatched id | Create the truly-absent ones; reconcile the id for the rest (don't duplicate) |
+| **Check 6** — subs customer already has a BA | Which customers already have a Billing Account (skip) vs need one | Keep BAs only for customers without one; create the gaps in Step 8 |
+
+### Step 8 — Load in dependency order
+
+Dry-run each entity, then load it. `python main.py` with no `--entity` runs all
+five in dependency order automatically; the pairs below just add a checkpoint per
+entity.
+
+```bash
+# Customers
+python main.py --dry-run --entity customer && python main.py --entity customer
+python main.py --entity customer --patch-eer        # link Electronic Email Recipients
+
+# Billing accounts (from the billing CSV)
+python main.py --dry-run --entity billingAccount && python main.py --entity billingAccount
+```
+
+For customers with **no** BA in NS **and none** in the billing CSV (flagged by
+Check 6), create one from the customer's NS address book — resolves the customer by
+C-number, no state-tracker seeding:
+
+```bash
+python create_billing_accounts.py           # dry-run — prints the BAs it would create
+python create_billing_accounts.py --apply    # POST them
+```
+
+> A deal skipped for "no default billing/shipping address" needs its customer
+> address added first: `python repair_customer_addresses.py`.
+
+```bash
+# Price plans, subscriptions, one-offs
+python main.py --dry-run --entity pricePlan && python main.py --entity pricePlan
+python main.py --entity subscription          # includes lines AND prices the interval
+python main.py --entity oneOff
+```
+
+### Step 9 — Verify
+
+```bash
+python main.py --report --failures
+python prod/prod_check.py sub-intervals --sub-id <ID>   # confirm the price landed on the interval
+```
 
 ### Load order & dependencies (non-negotiable)
 
@@ -203,8 +266,8 @@ The pipeline is identical. These are the only environment-specific realities:
 
 ### Prod-only extra steps (when the customer already exists)
 
-For a prod load where the customer is already live in NS, insert these between
-steps 2 and 5 of the standard sequence, **per deal**:
+For a prod load where the customer is already live in NS, run these after Step 6
+(Validate) and before Step 8 (Load), **per deal**:
 
 ```bash
 # Full readiness check for the deal (customer exists? BA? price plan/item resolve?)
@@ -220,7 +283,7 @@ python prod/seed_state.py --company-name "<NAME>" --netsuite-id <internal_id>   
 python prod/seed_state.py --company-name "<NAME>" --netsuite-id <internal_id> --apply
 ```
 
-Then run step 5 **without** `--entity customer` (it's seeded, not loaded).
+Then run Step 8 **without** `--entity customer` (it's seeded, not loaded).
 
 > **externalId match (gotcha):** the subscription looks for billing account
 > `<sub externalId>_BA`. If the sub externalId is `495006175463_27396`, the
