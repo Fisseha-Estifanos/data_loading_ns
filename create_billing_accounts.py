@@ -83,6 +83,15 @@ def build_payloads(v: Validator, bill_map: dict, ship_map: dict):
     (deal, reason) for deals we deliberately don't create, so nothing is silent.
     """
     ba_deals = {_deal_id((r.get("externalId") or "").strip()) for r in (v.bas or [])}
+    # NS requires a billingSchedule on every BA. Derive it from the billing CSV's
+    # own BAs, keyed by frequency (UPPER), so a synthesized BA uses the SAME
+    # schedule the batch's real BAs use for that frequency — never invented.
+    sched_by_freq = defaultdict(set)
+    for r in (v.bas or []):
+        fq = (r.get("frequency") or "").strip().upper()
+        sid = (r.get("billingSchedule_id") or "").strip()
+        if fq and sid:
+            sched_by_freq[fq].add(sid)
     deal_rows = defaultdict(list)
     for ext, grp in v.sub_groups.items():
         deal_rows[_deal_id(ext)].extend(grp)
@@ -128,6 +137,17 @@ def build_payloads(v: Validator, bill_map: dict, ship_map: dict):
         if not subsidiary_id:
             skips.append((deal, f"customer {name!r} has no NS subsidiary on record"))
             continue
+        scheds = sched_by_freq.get(frequency)
+        if not scheds:
+            skips.append((deal, f"no billing schedule known for frequency "
+                                f"{frequency!r} (no {frequency} BA in the billing "
+                                f"CSV to derive it from)"))
+            continue
+        if len(scheds) > 1:
+            skips.append((deal, f"ambiguous billing schedule for {frequency!r}: "
+                                f"{sorted(scheds)} — resolve in the billing CSV"))
+            continue
+        billing_schedule_id = next(iter(scheds))
         start_dates = sorted(
             (r.get("Start Date") or "").strip()
             for r in rows
@@ -144,6 +164,7 @@ def build_payloads(v: Validator, bill_map: dict, ship_map: dict):
             "subsidiary": {"id": str(subsidiary_id)},
             "currency": {"id": str(currency_id)},
             "frequency": {"id": frequency},
+            "billingSchedule": {"id": billing_schedule_id},
             "customerDefault": False,
             "requestOffCycleInvoice": False,
             "inactive": False,
