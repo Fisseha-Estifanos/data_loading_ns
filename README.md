@@ -129,6 +129,15 @@ python check_pricing_coverage.py       # PASS only if every sub-referenced plan 
 #    full price book, capped ~20k rows) instead of scoped to this batch's deals.
 #    filter_to_subs.py cannot fix it — re-run the pricing DDL scoped to the batch.
 
+# 4b. DECIDE which customers to load. Customers resolve to NS by C-number (the
+#     customer CSV's "C-number" column / the subs' NETSUITE_ACCOUNT_NUMBER*),
+#     NOT by External ID 2 (a HubSpot id absent from NS). In the validate report,
+#     under "CUSTOMERS — subscription resolves to an NS customer":
+#       • Check 1.2 lists, per customer, which are already in NS (skip — do NOT
+#         load) vs which are NOT in NS and must be created/loaded first.
+#       • Only load (step 5 customer) the customers Check 1.2 flags as NOT in NS.
+#         Subs/BAs for a customer that isn't in NS will be skipped at load.
+
 # 5. LOAD in dependency order. Dry-run each first, then the live run.
 python main.py --dry-run --entity customer        && python main.py --entity customer
 python main.py --entity customer --patch-eer       # link Electronic Email Recipients (2nd step)

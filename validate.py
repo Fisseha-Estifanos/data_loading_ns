@@ -52,6 +52,7 @@ CUSTOMER_CNUM_COL = "C-number"
 CHECK_ENTITY = {
     1: "subscription",
     1.1: "subscription",
+    1.2: "subscription",
     2: "billingAccount",
     3: "subscription",
     4: "billingAccount",
@@ -84,6 +85,7 @@ BLOCKER_CHECKS = {1, 1.1, 2, 3, 4, 5, 8, 9}
 CHECK_REQUIRED_CSVS = {
     1: {"subscription", "customer"},
     1.1: {"subscription"},
+    1.2: {"subscription", "customer"},
     2: {"billingAccount"},
     3: {"subscription", "customer"},
     4: {"subscription", "billingAccount"},
@@ -103,6 +105,7 @@ CHECK_REQUIRED_CSVS = {
 CHECK_GROUP = {
     1: "CUSTOMERS — subscription resolves to an NS customer",
     1.1: "CUSTOMERS — subscription resolves to an NS customer",
+    1.2: "CUSTOMERS — subscription resolves to an NS customer",
     2: "BILLING ACCOUNTS — customer link",
     3: "SUBSCRIPTIONS — subsidiary match",
     4: "BILLING ACCOUNTS — start dates",
@@ -118,6 +121,7 @@ CHECK_GROUP = {
 CHECK_TITLE = {
     1: "Sub customer resolves to an NS customer (by C-number)",
     1.1: "Sub customer's C-number is in the subs export AND exists in NS",
+    1.2: "Sub customer already in NS (skip load) vs must be created (load)",
     2: "BA customer resolves to an NS customer (by C-number via customer CSV)",
     3: "Sub subsidiary == its customer's NS subsidiary",
     4: "BA startDate present and <= earliest sub Start Date for the deal",
@@ -139,6 +143,9 @@ CHECK_EXPLAIN = {
     1.1: "Same, but using ONLY the C-number the subs export itself carries (no "
     "customers-CSV fallback). Confirms the subs file alone identifies a "
     "customer that exists in NS.",
+    1.2: "Per distinct customer: already in NS (skip — don't load it) or NOT in "
+    "NS (must be created/loaded first). Warns only on the ones to create; clean "
+    "= every sub customer already exists in NS.",
     2: "Does each billing account point at a real NS customer? Bridges its "
     "MP_HubSpot id → customers CSV → C-number → NS.",
     3: "Does each sub's Subsidiary match its NS customer's subsidiary? A mismatch "
@@ -317,8 +324,10 @@ class Validator:
         self.name_to_ext = {}
         self.name_to_cnum = {}
         self.ext2_to_cnum = {}
+        self.ext2_to_name = {}  # External ID 2 → Company Name (for readable BA findings)
         for r in self.customers or []:
-            nm = (r.get("Company Name") or "").strip().upper()
+            raw_nm = (r.get("Company Name") or "").strip()
+            nm = raw_nm.upper()
             ext = (r.get("External ID 2") or "").strip()
             cnum = (r.get(CUSTOMER_CNUM_COL) or "").strip()
             if nm and ext:
@@ -327,6 +336,7 @@ class Validator:
                 self.name_to_cnum[nm] = cnum
             if ext:
                 self.ext2_to_cnum[ext] = cnum
+                self.ext2_to_name[ext] = raw_nm
 
         # Group subs by deal external id (matches subscription loader grouping)
         self.sub_groups = defaultdict(list)
@@ -554,6 +564,39 @@ class Validator:
                     f"in {env} NS by entityid.",
                 )
 
+    def check_1_2_customer_load_status(self):
+        """Check 1.2 (WARNING): which sub customers must be CREATED vs already exist.
+
+        The explicit load-vs-skip view, deduplicated per customer (check 1 is
+        per deal and frames this as resolution success/failure). For each
+        distinct sub Customer, resolve its C-number (subs columns, else the
+        customers CSV) and ask: is that C-number in NS?
+          • IN NS  → the customer already exists; skip loading it (no finding).
+          • NOT in NS → warns once, naming the customer: it must be created/
+            loaded before its subscription, or the sub is skipped at load.
+        A customer counts as IN NS if ANY of its deals resolves. WARNING-only by
+        design — it's a "here's your create list", not a gate (check 1 gates).
+        Clean = every sub customer already exists in NS, nothing to create.
+        """
+        status: dict[str, bool] = {}  # customer name → in NS (any deal resolves)
+        for ext, grp in self.sub_groups.items():
+            name = (grp[0].get("Customer") or "").strip()
+            if not name:
+                continue
+            cnum = self.sub_cnum(grp)
+            resolved = bool(cnum and cnum in self.ns_by_cnum)
+            status[name] = status.get(name, False) or resolved
+        for name, in_ns in sorted(status.items()):
+            if not in_ns:
+                self.add(
+                    1.2,
+                    WARNING,
+                    name,
+                    f"customer {name!r}: NOT in NS — must be created/loaded before "
+                    f"its subscription (otherwise the sub is skipped at load). "
+                    f"Customers not listed here already exist in NS (skip load).",
+                )
+
     def check_2_ba_customer(self):
         """Check 2 (BLOCKER): every BA points at a real NS customer.
 
@@ -570,21 +613,24 @@ class Validator:
             if not cust_ext:
                 self.add(2, BLOCKER, ba_ext, "BA customer_externalId is blank.")
                 continue
+            # Customer name for eyeballing (from the customer CSV by External ID 2).
+            name = self.ext2_to_name.get(cust_ext)
+            who = f"{name!r} ({cust_ext})" if name else f"{cust_ext!r}"
             cnum = self.ext2_to_cnum.get(cust_ext)
             if cnum is None:
                 self.add(
                     2,
                     BLOCKER,
                     ba_ext,
-                    f"BA customer_externalId {cust_ext!r} matches no customer-CSV "
-                    f"row (cannot map to a C-number).",
+                    f"BA customer {who} matches no customer-CSV row "
+                    f"(cannot map to a C-number).",
                 )
             elif not cnum:
                 self.add(
                     2,
                     BLOCKER,
                     ba_ext,
-                    f"BA customer {cust_ext!r}: customer-CSV row has no C-number "
+                    f"BA customer {who}: customer-CSV row has no C-number "
                     f"('{CUSTOMER_CNUM_COL}' blank); cannot resolve to NS.",
                 )
             elif cnum not in self.ns_by_cnum:
@@ -592,7 +638,7 @@ class Validator:
                     2,
                     BLOCKER,
                     ba_ext,
-                    f"BA customer {cust_ext!r} → C-number {cnum} not found in NS.",
+                    f"BA customer {who} → C-number {cnum} not found in NS.",
                 )
 
     def check_3_subsidiary(self):
@@ -862,11 +908,13 @@ class Validator:
             if cid not in self.addr_shipping:
                 missing.append("shipping")
             if missing:
+                name = self.ext2_to_name.get(cust_ext)
+                who = f"{name!r} ({cust_ext})" if name else f"{cust_ext}"
                 self.add(
                     8,
                     BLOCKER,
                     ba_ext,
-                    f"customer {cust_ext} (C-number {cnum}, id {cid}) has no "
+                    f"customer {who} (C-number {cnum}, id {cid}) has no "
                     f"default {' and '.join(missing)} address in NS; BA load skips.",
                 )
 
@@ -925,7 +973,7 @@ class Validator:
 
         # Prefetch NS data only for the checks we'll run. All customer-touching
         # checks (1, 1.1, 2, 3, 8) now resolve via the single C-number map.
-        needs_customers = any(c in active_checks for c in (1, 1.1, 2, 3, 8))
+        needs_customers = any(c in active_checks for c in (1, 1.1, 1.2, 2, 3, 8))
         needs_priceplans = 7 in active_checks
         needs_pricing_csv = 7.1 in active_checks
         needs_addresses = 8 in active_checks
@@ -995,6 +1043,7 @@ class Validator:
         dispatch = {
             1: self.check_1_sub_customer,
             1.1: self.check_1_1_customer_in_env,
+            1.2: self.check_1_2_customer_load_status,
             2: self.check_2_ba_customer,
             3: self.check_3_subsidiary,
             4: self.check_4_startdates,
