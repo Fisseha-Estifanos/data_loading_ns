@@ -130,6 +130,38 @@ CHECK_TITLE = {
     10: "externalId shape sanity (BA = <deal_id>_BA)",
 }
 
+# One- to two-line plain-language explainer per check, printed under its heading
+# in the report so the output reads clearly without cross-referencing the code.
+CHECK_EXPLAIN = {
+    1: "Can each sub's customer be resolved to a real NS customer by C-number "
+    "(subs C-number, else customers-CSV)? Clean = customer already in NS, no "
+    "need to create it.",
+    1.1: "Same, but using ONLY the C-number the subs export itself carries (no "
+    "customers-CSV fallback). Confirms the subs file alone identifies a "
+    "customer that exists in NS.",
+    2: "Does each billing account point at a real NS customer? Bridges its "
+    "MP_HubSpot id → customers CSV → C-number → NS.",
+    3: "Does each sub's Subsidiary match its NS customer's subsidiary? A mismatch "
+    "is a hard NS 400 at load time.",
+    4: "Is each BA's startDate present and on/before its earliest subscription? "
+    "A blank/late start breaks the subs it bills.",
+    5: "Does every included sub line map to a real Sales Item (not blank / not "
+    "'NOT MAPPED')? Unmapped lines are silently skipped at load.",
+    6: "Does every deal have BOTH a subscription and a billing account? Warns on "
+    "either side missing (sub with no BA, or orphan BA).",
+    7: "Does each line's price plan already exist in NS? Warn = not loaded yet; "
+    "the line would fall back to the price-book default.",
+    7.1: "Does each line's price plan exist in the pricing CSV (i.e. CAN be "
+    "created)? Warn = no source row to push; line can only use the book "
+    "default.",
+    8: "Does each BA's customer have BOTH a default billing and shipping address "
+    "in NS? If not, the BA loader can't resolve them and skips the BA.",
+    9: "Does each BA have its mandatory NS reference fields (subsidiary_id, "
+    "currency_id) filled in the CSV?",
+    10: "Does each BA externalId follow the '<deal_id>_BA' convention? Drift here "
+    "quietly misaligns BAs and subs.",
+}
+
 
 @dataclass
 class Finding:
@@ -1043,6 +1075,9 @@ class Validator:
             else:
                 mark = "✓"
             print(f"\n[{mark}] Check {n}: {CHECK_TITLE[n]}")
+            explain = CHECK_EXPLAIN.get(n)
+            if explain:
+                print(f"      ↳ {explain}")
             for it in items:
                 print(f"      {it.severity:7} {it.ident}: {it.message}")
                 if it.severity == BLOCKER:
