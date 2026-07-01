@@ -318,22 +318,21 @@ class BillingAccountLoader(BaseLoader):
                 ext2s.add(ex)
         self.resolver.prefetch({c for c in cnums if c}, ext2s)
 
-        # Which of these customers already have a BA in NS?
-        cust_ids = set()
-        for rows in deal_rows.values():
-            cnum = (
-                _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
-                or self.resolver.name_cnum(rows[0].get("Customer", ""))
-            )
-            rec = self.resolver.resolve_record(cnum, self.resolver.name_ext(rows[0].get("Customer", "")))
-            if rec and rec.get("id"):
-                cust_ids.add(str(rec["id"]))
-        has_ba = self._customers_with_ba(cust_ids)
+        # Which `<deal>_BA` externalIds already exist in NS? (Per deal — a sub
+        # links to its BA by `<deal>_BA`, so a customer's OTHER BAs don't count.)
+        gap_ext_ids = {
+            config.apply_revision(f"{d}_BA")
+            for d in deal_rows
+            if d not in ba_deals
+        }
+        existing_ns = self._ba_extids_in_ns(gap_ext_ids)
 
         payloads, skips = [], []
         for deal, rows in sorted(deal_rows.items()):
             if deal in ba_deals:
                 continue  # a BA row is already being loaded for this deal
+            if config.apply_revision(f"{deal}_BA") in existing_ns:
+                continue  # this deal's `<deal>_BA` already exists in NS
             name = (rows[0].get("Customer") or "").strip()
             cnum = (
                 _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
@@ -343,8 +342,6 @@ class BillingAccountLoader(BaseLoader):
             if not (rec and rec.get("id")):
                 continue  # not in NS — the customer load owns this
             cid = str(rec["id"])
-            if cid in has_ba:
-                continue  # already has a BA in NS — skip
             bill_addr, ship_addr = self._bill_addr_map.get(cid), self._ship_addr_map.get(cid)
             if not (bill_addr and ship_addr):
                 skips.append((deal, f"customer {name!r} (id {cid}) has no default "
@@ -428,18 +425,17 @@ class BillingAccountLoader(BaseLoader):
         return {"created": created, "failed": failed, "skipped": len(skips),
                 "dry_run": dry_run, "total": len(payloads)}
 
-    def _customers_with_ba(self, customer_internal_ids) -> set:
-        """Set of customer internal ids that already have ≥1 Billing Account in NS."""
+    def _ba_extids_in_ns(self, ext_ids) -> set:
+        """Subset of the given `<deal>_BA` externalIds that already exist in NS."""
         have = set()
-        ids = sorted({str(i) for i in customer_internal_ids if i})
+        ids = sorted({e for e in ext_ids if e})
         for i in range(0, len(ids), 200):
             chunk = ids[i : i + 200]
-            in_clause = ",".join("'" + c + "'" for c in chunk)
-            q = f"SELECT customer FROM billingaccount WHERE customer IN ({in_clause})"
+            in_clause = ",".join("'" + e.replace("'", "''") + "'" for e in chunk)
+            q = f"SELECT externalid FROM billingaccount WHERE externalid IN ({in_clause})"
             for row in self.client.suiteql_query(q):
-                c = row.get("customer")
-                if c:
-                    have.add(str(c))
+                if row.get("externalid"):
+                    have.add(row["externalid"])
         return have
 
     def patch_startdates(self, dry_run: bool = False) -> dict:

@@ -173,7 +173,7 @@ in the *Group* column.
 | 3 | Already in NS (skip) vs must create (load) | Warning | NS | Customers | Per customer: already in NS → skip loading; not in NS → must be created first. Your load-vs-skip roster. |
 | 4 | Truly absent vs in NS under a different id | Warning | NS | Customers | For customers check 3 flagged: genuinely missing (create) vs already in NS under a mismatched id (reconcile — don't create a duplicate). |
 | 5 | BA customer resolves to an NS customer | Blocker | NS + CSV | Billing accounts | Each billing-account row points at a real NS customer (bridged via the customer CSV, or by the loaded externalId). |
-| 6 | Subs customer already has a BA in NS | Warning | NS + CSV | Billing accounts | Each subscription's customer has a Billing Account — already in NS, or one queued in the billing CSV. Warns when **neither** (its sub would be unbilled). |
+| 6 | Every sub deal has its own `<deal>_BA` | Warning | NS + CSV | Billing accounts | Each subscription **deal** has its own Billing Account `<deal>_BA` — already in NS, or one queued in the billing CSV. Warns when **neither** (that sub would be unbilled). A sub links to `<deal>_BA`, so the customer's *other* BAs don't count. |
 | 7 | Sub subsidiary == NS customer's subsidiary | Blocker | NS + CSV | Subscriptions | The sub's Subsidiary equals its NS customer's subsidiary. A mismatch is a hard NS 400 at load. |
 | 8 | BA startDate <= earliest sub Start Date | Blocker | CSV | Billing accounts | Each BA's startDate is present and on/before its earliest subscription start (a blank/late start breaks the subs it bills). |
 | 9 | Active sub line Sales Item is mapped | Blocker | CSV | Subscriptions | Every included sub line has a real Sales Item (not blank / not `NOT MAPPED`) — unmapped lines load silently short. |
@@ -194,7 +194,7 @@ from NS).
 | --- | --- | --- |
 | **Check 3** — already in NS vs must create | Which customers exist in NS (skip) vs which don't | Load only the customers flagged **NOT in NS** |
 | **Check 4** — truly absent vs different id | Whether a flagged customer is genuinely missing or has a mismatched id | Create the truly-absent ones; reconcile the id for the rest (don't duplicate) |
-| **Check 6** — subs customer already has a BA | Which customers already have a Billing Account (skip) vs need one | Keep BAs only for customers without one; create the gaps in Step 8 |
+| **Check 6** — every sub deal has its own `<deal>_BA` | Which sub deals already have a `<deal>_BA` (skip) vs which deals have none | Load the `<deal>_BA` rows in the billing CSV; fill genuine per-deal gaps with `--create-missing-bas` in Step 8 |
 
 ### Step 8 — Load in dependency order
 
@@ -211,9 +211,10 @@ python main.py --entity customer --patch-eer        # link Electronic Email Reci
 python main.py --dry-run --entity billingAccount && python main.py --entity billingAccount
 ```
 
-For customers with **no** BA in NS **and none** in the billing CSV (flagged by
-Check 6), the BA loader can synthesize one from the customer's NS address book +
-the subscription — resolving the customer by C-number, no seeding:
+For any sub **deal** whose `<deal>_BA` is **neither** in NS **nor** in the billing
+CSV (flagged by Check 6), the BA loader can synthesize one from the customer's NS
+address book + the subscription — one `<deal>_BA` per gap deal, resolving the
+customer by C-number, no seeding:
 
 ```bash
 python main.py --dry-run --entity billingAccount --create-missing-bas   # preview the BAs
@@ -333,7 +334,7 @@ Then run Step 8 **without** `--entity customer` (they already exist in NS).
 | `--patch` | — | **Retroactive only.** PATCH already-loaded customers with custom fields. Not needed for new loads (fields are in `build_payload()`). Customer only. |
 | `--patch-eer` | — | Link `custentity_zellis_elec_email_recipients` (two-step POST+PATCH). Run after `--entity customer`. |
 | `--patch-ba-startdate` | — | PATCH billing-account startDates from the CSV where they differ from NS. Use with `--entity billingAccount`. |
-| `--create-missing-bas` | — | Create BAs for subscription customers with no BA (none in NS, none in the billing CSV) from the customer's NS address book + the subscription. Honours `--dry-run`. Use with `--entity billingAccount`. |
+| `--create-missing-bas` | — | Create a `<deal>_BA` for each sub deal that has none (its `<deal>_BA` is neither in NS nor in the billing CSV) from the customer's NS address book + the subscription. Honours `--dry-run`. Use with `--entity billingAccount`. |
 
 ## Read-only inspector — `prod/prod_check.py`
 

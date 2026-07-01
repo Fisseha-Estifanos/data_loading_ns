@@ -26,6 +26,7 @@ Usage:
 """
 
 import os
+import re
 import csv
 import sys
 import argparse
@@ -109,7 +110,7 @@ CHECK_GROUP = {
     3: "CUSTOMERS — subscription resolves to an NS customer",
     4: "CUSTOMERS — subscription resolves to an NS customer",
     5: "BILLING ACCOUNTS — customer link",
-    6: "BILLING ACCOUNTS — subs customer already has one in NS (load vs skip)",
+    6: "BILLING ACCOUNTS — every deal has one (load vs create)",
     7: "SUBSCRIPTIONS — subsidiary match",
     8: "BILLING ACCOUNTS — start dates",
     9: "SUBSCRIPTIONS — sales items",
@@ -121,12 +122,12 @@ CHECK_GROUP = {
 }
 
 CHECK_TITLE = {
-    1: "Sub customer resolves to an NS customer (by C-number)",
+    1: "Sub customer resolves to the CORRECT NS customer (by C-number, name-checked)",
     2: "Subs export's own C-number is valid in NS",
     3: "Sub customer already in NS (skip load) vs must be created (load)",
     4: "Flagged customer: truly absent from NS vs in NS under a different id",
     5: "BA customer resolves to an NS customer (by C-number via customer CSV)",
-    6: "Subs customer already has a Billing Account in NS (skip) vs needs one",
+    6: "Every sub deal has its own Billing Account (<deal>_BA), loaded or in NS",
     7: "Sub subsidiary == its customer's NS subsidiary",
     8: "BA startDate present and <= earliest sub Start Date for the deal",
     9: "Active sub line Sales Item is mapped (not blank / not NOT MAPPED)",
@@ -141,8 +142,9 @@ CHECK_TITLE = {
 # in the report so the output reads clearly without cross-referencing the code.
 CHECK_EXPLAIN = {
     1: "Can each sub's customer be resolved to a real NS customer by C-number "
-    "(subs C-number, else customers-CSV)? Clean = customer already in NS, no "
-    "need to create it.",
+    "(subs C-number, else customers-CSV)? Clean = already in NS (no need to "
+    "create it). Also WARNS if the resolved NS customer's NAME doesn't match — "
+    "i.e. the C-number points at the wrong company.",
     2: "Validates the C-number the subs export ITSELF carries "
     "(NETSUITE_ACCOUNT_NUMBER*) actually exists in NS — catches a wrong/stale "
     "account number even when check 1 resolved the customer another way. Silent "
@@ -155,9 +157,10 @@ CHECK_EXPLAIN = {
     "C-number / External ID 2 bridge failed — reconcile, don't duplicate'.",
     5: "Does each billing account point at a real NS customer? Bridges its "
     "MP_HubSpot id → customers CSV → C-number → NS.",
-    6: "Asked straight of NS: does each subs customer already have a Billing "
-    "Account? Load BAs only for those that don't. Warns when a customer has "
-    "NO BA in NS AND none in the billing CSV — its sub would be unbilled.",
+    6: "Per sub DEAL: is there a `<deal>_BA` — queued in the billing CSV or "
+    "already in NS? Warns for deals with none (their sub loads unbilled). A "
+    "customer's OTHER billing accounts don't count — the sub links by "
+    "`<deal>_BA`.",
     7: "Does each sub's Subsidiary match its NS customer's subsidiary? A mismatch "
     "is a hard NS 400 at load time.",
     8: "Is each BA's startDate present and on/before its earliest subscription? "
@@ -369,9 +372,10 @@ class Validator:
         # UPPER(companyname) → record. Last-resort lookup for check 4 only:
         # tells "truly absent from NS" apart from "in NS but the id bridge failed".
         self.ns_by_name: dict[str, dict] = {}
-        # Customer INTERNAL ids that already have ≥1 Billing Account in NS — asked
-        # directly of NS (check 6), so we load BAs only for customers without one.
-        self.ns_cust_has_ba: set[str] = set()
+        # Revisioned `<deal>_BA` externalIds that already exist in NS — asked
+        # directly of NS (check 6). Per-deal, because a sub links to its BA by
+        # `<deal>_BA` externalId, not by "the customer has some BA".
+        self.ns_ba_extids: set[str] = set()
         self.ns_priceplans: set[str] = set()  # revisioned extIds that exist
         self.pricing_csv_extids: set[str] = set()  # RAW extIds in the pricing CSV
         self.addr_billing: set[str] = set()  # customer internal ids w/ default bill
@@ -507,25 +511,25 @@ class Validator:
                         "companyname": row.get("companyname"),
                     }
 
-    def _fetch_ns_customer_bas(self, customer_internal_ids):
-        """Record which customers already have a Billing Account in NS.
+    def _fetch_ns_ba_extids(self, ba_ext_ids):
+        """Record which ``<deal>_BA`` billing accounts already exist in NS.
 
-        For the given customer INTERNAL ids, queries the ``billingaccount``
-        record and fills ``self.ns_cust_has_ba`` with the ids that have at least
-        one. Check 6 then asks "is this subs customer's id in that set?". Asked
-        straight of NS — no state tracker, no customer CSV — so it works even when
-        the customer/billing CSVs are trimmed to just the new records.
+        ``ba_ext_ids`` are the REVISIONED ``<deal>_BA`` externalIds. Fills
+        ``self.ns_ba_extids`` with the subset present, via chunked ``WHERE
+        externalid IN (...)``. Check 6 reasons PER DEAL — a subscription links to
+        its BA by ``<deal>_BA`` externalId, so the right question is "does THIS
+        deal's BA exist (loaded already, or queued in the billing CSV)?", not
+        "does the customer have some other BA?".
         """
-        ids = sorted({str(i) for i in customer_internal_ids if i})
+        ids = sorted({e for e in ba_ext_ids if e})
         for chunk in _chunk(ids):
             q = (
-                "SELECT customer FROM billingaccount "
-                f"WHERE customer IN ({_sql_in(chunk)})"
+                "SELECT externalid FROM billingaccount "
+                f"WHERE externalid IN ({_sql_in(chunk)})"
             )
             for row in self.client.suiteql_query(q):
-                c = row.get("customer")
-                if c:
-                    self.ns_cust_has_ba.add(str(c))
+                if row.get("externalid"):
+                    self.ns_ba_extids.add(row["externalid"])
 
     def customer_ns_record(self, cnum: str, ext2: str):
         """The NS customer record for (C-number, External ID 2), or None.
@@ -588,9 +592,30 @@ class Validator:
                 if (row.get("defaultshipping") or "").upper() == "T":
                     self.addr_shipping.add(ent)
 
+    @staticmethod
+    def _names_match(sub_name: str, ns_name: str) -> bool:
+        """Loose company-name equality for the wrong-customer guard.
+
+        Lower-cases, drops common company suffixes (Ltd/Limited/LLP/PLC/…) and all
+        non-alphanumerics, then checks either normalised name contains the other.
+        Tolerant enough to pass legitimate variations ("Link Up Mitaka Ltd" vs
+        "Link Up Mitaka Limited") while still catching a C-number that resolved to
+        an unrelated company ("Care Shield Services Limited" vs "AMA Capital LLP").
+        Returns True when it can't meaningfully compare (either side blank).
+        """
+        def norm(s: str) -> str:
+            s = (s or "").lower()
+            s = re.sub(r"\b(limited|ltd|llp|plc|inc|co|company|group|services?)\b", " ", s)
+            return re.sub(r"[^a-z0-9]", "", s)
+
+        a, b = norm(sub_name), norm(ns_name)
+        if not a or not b:
+            return True
+        return a in b or b in a
+
     # ── checks ───────────────────────────────────────────────────────────
     def check_1_sub_customer(self):
-        """Check 1: every subscription's customer resolves to an NS customer.
+        """Check 1: every subscription's customer resolves to the CORRECT NS customer.
 
         Resolution per sub group via ``customer_ns_record``: by C-number
         (``sub_cnum``: subs NETSUITE_ACCOUNT_NUMBER / _COMPANY_LEVEL, else the
@@ -599,18 +624,33 @@ class Validator:
         apply_revision(External ID 2), which have no C-number in the CSV.
 
         Severities:
-          • resolved → clean (customer is in NS).
+          • resolved AND the NS customer's name matches → clean.
+          • resolved but the NS name does NOT match the sub's Customer → WARNING:
+            the C-number/externalId points at the WRONG customer (e.g. a C-number
+            that belongs to a different company in this env). Catches the wrong-
+            binding the load would otherwise make silently.
           • a concrete C-number was supplied but neither it nor the externalId is
             in NS → BLOCKER (an id that should exist but doesn't).
           • no C-number at all and not loaded under its externalId → WARNING (the
             customer isn't in NS yet; create/load it — the sub would be skipped).
-            Names the customer for eyeballing against the customers CSV.
         """
         for ext, grp in self.sub_groups.items():
             name = (grp[0].get("Customer") or "").strip()
             cnum = self.sub_cnum(grp)
             ext2 = self.resolve_customer_ext(name)
-            if self.customer_ns_record(cnum, ext2):
+            rec = self.customer_ns_record(cnum, ext2)
+            if rec:
+                ns_name = rec.get("companyname") or ""
+                if ns_name and not self._names_match(name, ns_name):
+                    self.add(
+                        1,
+                        WARNING,
+                        ext,
+                        f"customer {name!r} resolved to NS customer {ns_name!r} "
+                        f"(id {rec.get('id')}) — names DON'T match; the C-number / "
+                        f"externalId likely points at the WRONG customer. Verify "
+                        f"before loading (the sub would bind to the wrong account).",
+                    )
                 continue  # in NS (by C-number or loaded externalId)
             if cnum:
                 self.add(
@@ -800,52 +840,45 @@ class Validator:
                     f"(and not loaded under its externalId).",
                 )
 
-    def check_6_subs_customer_has_ba(self):
-        """Check 6 (WARNING): every subscription's customer has a Billing Account
-        — either already in NS, or one being loaded in the billing CSV.
+    def check_6_deal_has_ba(self):
+        """Check 6 (WARNING): every sub deal has its own Billing Account (`<deal>_BA`).
 
-        Asked straight of NetSuite: a customer's NS internal id is matched against
-        the set that have ≥1 ``billingaccount`` (``ns_cust_has_ba``). So you load
-        BAs ONLY for customers that don't already have one. Per distinct customer:
-          • has a BA already in NS → covered (skip — don't load one). No finding.
-          • no NS BA, but a BA row IS in the billing CSV for one of its deals →
-            covered (it'll be loaded). No finding.
-          • neither → WARNING: the subscription would have NO billing account.
-            This is exactly the risk of stripping a BA for a customer that turns
-            out NOT to have one in NS.
-        Customers not resolvable to an NS id are skipped here (check 1 owns those).
-        WARNING-only — a billing-readiness roster, not a gate.
+        A subscription links to its billing account by the `<deal>_BA` externalId,
+        so this is asked PER DEAL — not per customer. A deal is covered when its
+        `<deal>_BA` is either:
+          • already in NS (revisioned externalId in ``ns_ba_extids``), or
+          • queued in the billing CSV (a row whose deal id matches).
+        A deal with NEITHER → WARNING: its subscription would load with no
+        billing account (NS may silently auto-attach the customer's default BA).
+        Fix by keeping the deal's BA row in the billing CSV, or
+        `--create-missing-bas`. NB: a customer having some OTHER billing account
+        does NOT cover a deal — the sub needs THIS deal's `<deal>_BA`.
         """
-        ba_deals = {
+        ba_csv_deals = {
             _deal_id((r.get("externalId") or "").strip()) for r in (self.bas or [])
         }
-        cust: dict[str, dict] = {}  # name → {"id": ns id|None, "deals": set}
-        for ext, grp in self.sub_groups.items():
-            name = (grp[0].get("Customer") or "").strip()
-            if not name:
-                continue
-            info = cust.setdefault(name, {"id": None, "deals": set()})
-            info["deals"].add(_deal_id(ext))
-            rec = self.customer_ns_record(
-                self.sub_cnum(grp), self.resolve_customer_ext(name)
+        # name + customer-resolvability per deal, so we only flag deals whose
+        # customer is actually in NS (others are owned by checks 1/3/4).
+        for deal in sorted({_deal_id(e) for e in self.sub_groups}):
+            grp = next(
+                g for e, g in self.sub_groups.items() if _deal_id(e) == deal
             )
-            if rec and rec.get("id"):
-                info["id"] = rec["id"]
-        for name, info in sorted(cust.items()):
-            if not info["id"]:
-                continue  # not in NS — checks 1 / 3 / 4 own this
-            has_ns_ba = str(info["id"]) in self.ns_cust_has_ba
-            has_csv_ba = bool(info["deals"] & ba_deals)
-            if has_ns_ba or has_csv_ba:
-                continue  # covered
+            name = (grp[0].get("Customer") or "").strip()
+            if not self.customer_ns_record(
+                self.sub_cnum(grp), self.resolve_customer_ext(name)
+            ):
+                continue  # customer not in NS — checks 1 / 3 / 4 own this
+            if deal in ba_csv_deals:
+                continue  # a `<deal>_BA` row is queued in the billing CSV
+            if config.apply_revision(f"{deal}_BA") in self.ns_ba_extids:
+                continue  # `<deal>_BA` already exists in NS
             self.add(
                 6,
                 WARNING,
-                name,
-                f"customer {name!r} (id {info['id']}) has NO Billing Account in NS "
-                f"and none in the billing CSV to load — its subscription would "
-                f"have no billing account. Load a BA for it, or confirm it should "
-                f"bill against an existing NS account.",
+                deal,
+                f"deal {deal} (customer {name!r}) has NO `{deal}_BA` — neither in "
+                f"the billing CSV nor in NS. Its subscription would load with no "
+                f"billing account. Add the BA row, or run --create-missing-bas.",
             )
 
     def check_7_subsidiary(self):
@@ -1163,7 +1196,7 @@ class Validator:
             c in active_checks for c in (1, 2, 3, 4, 5, 6, 7, 12)
         )
         needs_names = 4 in active_checks
-        needs_cust_bas = 6 in active_checks
+        needs_ba_extids = 6 in active_checks
         needs_priceplans = 10 in active_checks
         needs_pricing_csv = 11 in active_checks
         needs_addresses = 12 in active_checks
@@ -1230,20 +1263,16 @@ class Validator:
             print(f"  · querying NS for {len(names)} customer company names…")
             self._fetch_ns_by_name(names)
 
-        if needs_cust_bas:
-            # For check 6: which subs customers already have a Billing Account in
-            # NS. Resolve each subs customer to its NS internal id, then ask NS.
-            cust_ids = set()
-            for grp in self.sub_groups.values():
-                rec = self.customer_ns_record(
-                    self.sub_cnum(grp), self.resolve_customer_ext(grp[0].get("Customer"))
-                )
-                if rec and rec.get("id"):
-                    cust_ids.add(rec["id"])
+        if needs_ba_extids:
+            # For check 6: which `<deal>_BA` billing accounts already exist in NS.
+            # Per deal (the sub links to its BA by `<deal>_BA` externalId).
+            ba_extids = {
+                config.apply_revision(f"{_deal_id(e)}_BA") for e in self.sub_groups
+            }
             print(
-                f"  · querying NS billing accounts for {len(cust_ids)} customers…"
+                f"  · querying NS for {len(ba_extids)} `<deal>_BA` externalIds…"
             )
-            self._fetch_ns_customer_bas(cust_ids)
+            self._fetch_ns_ba_extids(ba_extids)
 
         if needs_priceplans:
             rev_pps = set()
@@ -1293,7 +1322,7 @@ class Validator:
             3: self.check_3_customer_load_status,
             4: self.check_4_customer_name_in_ns,
             5: self.check_5_ba_customer,
-            6: self.check_6_subs_customer_has_ba,
+            6: self.check_6_deal_has_ba,
             7: self.check_7_subsidiary,
             8: self.check_8_startdates,
             9: self.check_9_sales_item,
