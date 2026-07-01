@@ -243,6 +243,43 @@ python main.py --report --failures
 python prod/prod_check.py sub-intervals --sub-id <ID>   # confirm the price landed on the interval
 ```
 
+### Step 10 — *(If needed)* Fix a bad subscription load (delete + reload)
+
+NetSuite upserts by externalId, so re-running the loader will **not** repair a
+subscription that loaded **without its own billing account** or **bound to the
+wrong customer** — the record must be deleted and re-created.
+`scripts/cleanup_unbilled_subscriptions.py` finds those subs against live NS,
+and (with `--execute`) deletes them + clears their state row so the next
+subscription load re-creates them cleanly. Read-only by default; refuses to
+`--execute` against prod without `--allow-prod`.
+
+```bash
+# Preview subs with no billing account (read-only):
+python scripts/cleanup_unbilled_subscriptions.py
+
+# Also catch subs bound to the wrong customer, then delete + un-gate for reload:
+python scripts/cleanup_unbilled_subscriptions.py --name-mismatch
+python scripts/cleanup_unbilled_subscriptions.py --name-mismatch --execute
+```
+
+| Flag | Effect |
+| --- | --- |
+| *(none)* | Scan the subs CSV; flag subs missing a billing account. |
+| `--all-revision` | Scan every NS subscription under the current `LOAD_REVISION`, not just the CSV. |
+| `--ext-id EXT` | Target a specific raw sub externalId (repeatable); always a candidate. |
+| `--name-mismatch` | Also flag subs whose bound NS customer name mismatches the CSV. |
+| `--keep-missing-ba` | Don't treat a missing billing account as a reason (pair with `--name-mismatch`). |
+| `--execute` | Actually delete (default is a preview). |
+| `--allow-prod` | Permit `--execute` against a production account. |
+
+Then fill the billing-account gaps and reload:
+
+```bash
+python main.py --dry-run --entity billingAccount --create-missing-bas
+python main.py --entity billingAccount --create-missing-bas
+python main.py --entity subscription
+```
+
 ### Load order & dependencies (non-negotiable)
 
 ```text

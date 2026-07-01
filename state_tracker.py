@@ -110,6 +110,20 @@ class StateTracker:
         )
         self.conn.commit()
 
+    def delete_state(self, entity_type: str, external_id: str) -> bool:
+        """Remove a record's load-state row so a re-run re-creates it.
+
+        Returns True if a row was deleted. Used by cleanup tooling after a
+        record is deleted from NetSuite, so ``is_already_loaded`` no longer
+        short-circuits the reload.
+        """
+        cur = self.conn.execute(
+            "DELETE FROM load_state WHERE entity_type = ? AND external_id = ?",
+            (entity_type, external_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     # ─── Run Logging ────────────────────────────────────────────────────
 
     def start_run(self, entity_type: str) -> int:
