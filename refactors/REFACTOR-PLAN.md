@@ -18,6 +18,14 @@
 > §3.1's "all carry the revision suffix" is FALSE for customers. NSIndex MUST query `customer` by raw
 > externalId even though callers pass the revisioned key. Querying customers by `<ext>_rvn_prod_01`
 > returns zero rows. `validate.py` already resolves customers raw — copy that behaviour into NSIndex.
+>
+> **SUPERSEDED for customers (2026-07-09):** customer resolution no longer uses externalId AT ALL.
+> Subs and BAs resolve/attach their customer by **C-number (NS `entityid`) and nothing else** — see
+> `customer_resolver.py` (shared by the sub/BA loaders and `validate.py`). The C-number comes from
+> the subs export's `NETSUITE_ACCOUNT_NUMBER*` columns (BAs bridge via their `<sub>_BA` key), else
+> the customer CSV's `C-number` column. When WS2's NSIndex is built, the `customer` entity must be
+> keyed by **entityid**, not externalId; the raw-externalId note above remains relevant only for
+> querying customers this loader itself created (their externalId is `apply_revision(External ID 2)`).
 > **Owner:** Fisseha (Kleene) · NetSuite loader for MoorePay (HubSpot→NetSuite migration).
 
 ---

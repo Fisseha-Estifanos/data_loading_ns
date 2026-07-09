@@ -10,7 +10,7 @@ Key design:
     plan-defining row (NULL on component/add-on rows). Those two fields are
     resolved by scanning all rows in the group for a non-empty value.
   - Each row produces a list of item names to include (split from comma-separated Sales Item cells)
-  - Customer is resolved to its NS internal id by C-number / externalId, straight
+  - Customer is resolved to its NS internal id by C-number ONLY, straight
     from NetSuite (see customer_resolver.CustomerResolver) — NOT via the state
     tracker, so pre-existing customers resolve without seeding
   - Billing account is resolved by {sub External ID}_BA (one BA per sub,
@@ -71,8 +71,8 @@ class SubscriptionLoader(BaseLoader):
     def __init__(self, client, tracker):
         super().__init__(client, tracker)
         # Resolve each subscription's customer to its NS internal id directly
-        # from NetSuite, by C-number / externalId (no state-tracker dependency,
-        # so pre-existing customers resolve without seeding).
+        # from NetSuite, by C-number ONLY (convention since 2026-07-09 — no
+        # externalId / name resolution; no state-tracker dependency).
         self.resolver = CustomerResolver(client)
         self._prefetch_customers()
         # ext_id → ordered list of (item_name, price_plan_external_id_or_None).
@@ -85,11 +85,12 @@ class SubscriptionLoader(BaseLoader):
     def _prefetch_customers(self) -> None:
         """One batched NS query for every customer the subs reference.
 
-        Gathers C-numbers (the subs' NETSUITE_ACCOUNT_NUMBER* columns, plus the
-        customer CSV's C-number by name) and External ID 2s (by name), then
-        prefetches their NS internal ids so per-group resolution is local.
+        Gathers C-numbers only — the subs' NETSUITE_ACCOUNT_NUMBER* columns,
+        plus the customer CSV's C-number bridged by name — then prefetches
+        their NS internal ids so per-group resolution is local. The C-number
+        is the ONLY NS key (no externalId / name lookups).
         """
-        cnums, ext2s = set(), set()
+        cnums = set()
         for row in self.read_csv():
             name = row.get("Customer", "")
             for col in ("NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"):
@@ -99,14 +100,10 @@ class SubscriptionLoader(BaseLoader):
             nc = self.resolver.name_cnum(name)
             if nc:
                 cnums.add(nc)
-            ext2 = self.resolver.name_ext(name)
-            if ext2:
-                ext2s.add(ext2)
-        self.resolver.prefetch(cnums, ext2s)
+        self.resolver.prefetch(cnums)
         logger.info(
-            "Customer resolver: %d C-numbers + %d externalIds known in NS",
+            "Customer resolver: %d C-numbers known in NS",
             len(self.resolver.ns_by_cnum),
-            len(self.resolver.ns_by_ext),
         )
 
     @staticmethod
@@ -205,22 +202,24 @@ class SubscriptionLoader(BaseLoader):
         header = rows[0]
 
         customer_name = header.get("Customer", "").strip()
-        # Resolve the customer's NS internal id by C-number (subs columns, else
-        # the customer CSV by name) or by its loaded/raw External ID 2 — straight
-        # from NetSuite, no state tracker. Pre-existing customers resolve here
-        # without seeding.
+        # Resolve the customer's NS internal id by C-number ONLY (subs columns
+        # first, else the customer CSV's C-number bridged by name) — straight
+        # from NetSuite, no state tracker, no externalId/name lookups. A sub
+        # whose customer has no resolvable C-number is skipped with an error;
+        # never bound by any other key.
         cnum = (
             self._first_value(
                 rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"
             )
             or self.resolver.name_cnum(customer_name)
         )
-        ext2 = self.resolver.name_ext(customer_name)
-        customer_ns_id = self.resolver.resolve(cnum, ext2)
+        customer_ns_id = self.resolver.resolve(cnum)
         if not customer_ns_id:
             logger.error(
                 f"Subscription {raw_ext_id}: cannot resolve customer "
-                f"'{customer_name}' to an NS customer (by C-number or externalId)."
+                f"'{customer_name}' by C-number "
+                f"({cnum or 'no C-number in subs export or customer CSV'}). "
+                f"Customers attach by C-number only — fix the export."
             )
             return None
 

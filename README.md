@@ -168,11 +168,12 @@ in the *Group* column.
 
 | # | Check | Severity | Reads | Group | What it verifies (and why it matters) |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Sub customer resolves to an NS customer | Blocker | NS + CSV | Customers | Each subscription's customer exists in NS — by C-number, or by the externalId it was loaded under. If not, the sub has no customer to attach to. |
+| 1 | Sub customer resolves to an NS customer | Blocker | NS + CSV | Customers | Each subscription's customer resolves in NS by **C-number ONLY** (subs `NETSUITE_ACCOUNT_NUMBER*`, else the customer CSV's `C-number` by name) — the only key the loaders attach by. Also warns when the resolved NS customer's NAME doesn't match (C-number points at the wrong company). |
 | 2 | Subs export's own C-number is valid in NS | Blocker | NS | Customers | The C-number the subs file itself carries (`NETSUITE_ACCOUNT_NUMBER*`) actually exists in NS — catches a wrong/stale account number even when check 1 resolved the customer another way. Silent if the subs carry no C-number. |
 | 3 | Already in NS (skip) vs must create (load) | Warning | NS | Customers | Per customer: already in NS → skip loading; not in NS → must be created first. Your load-vs-skip roster. |
 | 4 | Truly absent vs in NS under a different id | Warning | NS | Customers | For customers check 3 flagged: genuinely missing (create) vs already in NS under a mismatched id (reconcile — don't create a duplicate). |
-| 5 | BA customer resolves to an NS customer | Blocker | NS + CSV | Billing accounts | Each billing-account row points at a real NS customer (bridged via the customer CSV, or by the loaded externalId). |
+| 5 | BA customer resolves to an NS customer | Blocker | NS + CSV | Billing accounts | Each BA's customer resolves by **C-number ONLY** — sourced from its owning sub's `NETSUITE_ACCOUNT_NUMBER*` (via the `<sub>_BA` key), else the customer CSV's C-number bridged from `customer_externalId`. |
+| 5.1 | BA subsidiary matches its customer | Blocker | NS + CSV | Billing accounts | Each BA's `subsidiary_id` equals the NS subsidiary of the customer it binds to — a mismatch is a hard NS 400 (`Invalid Field Value ... subsidiary`). |
 | 6 | Every sub has its own `<deal>_<subid>_BA` | Warning | NS + CSV | Billing accounts | Each **sub** has its own Billing Account keyed `<sub External ID>_BA` (the `<deal>_<subid>_BA` convention) — already in NS, or one queued in the billing CSV. Warns when **neither** (that sub would be unbilled). A sub links to its own `<sub>_BA`, so the customer's *other* BAs — even a sibling sub's — don't count. |
 | 7 | Sub subsidiary == NS customer's subsidiary | Blocker | NS + CSV | Subscriptions | The sub's Subsidiary equals its NS customer's subsidiary. A mismatch is a hard NS 400 at load. |
 | 8 | BA startDate <= earliest sub Start Date | Blocker | CSV | Billing accounts | Each BA's startDate is present and on/before its earliest subscription start (a blank/late start breaks the subs it bills). |
@@ -186,9 +187,11 @@ in the *Group* column.
 ### Step 7 — Decide what to load
 
 The validate report tells you, per customer, exactly what to load vs skip.
-Customers resolve to NS by **C-number** (the customer CSV's `C-number` column / the
-subs' `NETSUITE_ACCOUNT_NUMBER*`), **not** by External ID 2 (a HubSpot id absent
-from NS).
+Customers resolve to NS by **C-number ONLY** (the subs' `NETSUITE_ACCOUNT_NUMBER*`,
+else the customer CSV's `C-number` column bridged by name) — never by External ID 2
+or company name (convention since 2026-07-09). A customer this loader CREATES gets
+an NS-assigned C-number the exports don't know yet: create it, then **re-export so
+the subs carry its C-number**, or its subs/BAs cannot attach.
 
 | Report check | Tells you | Action |
 | --- | --- | --- |
@@ -290,8 +293,44 @@ python main.py --entity subscription
 5. One-Off Invoice       ← references Customer NS internal ID
 ```
 
-Each child resolves its parent's NS internal ID from the state DB. If the parent
-isn't loaded, the child is skipped with a logged error.
+BA / pricePlan parents are resolved from the state DB; **customers are not** —
+see the attach flow below. If a parent can't be resolved, the child is skipped
+with a logged error.
+
+### How records attach (C-number convention, since 2026-07-09)
+
+One rule: **a customer is only ever found by its C-number (NS `entityid`) —
+nothing else.** No externalId lookups, no company-name matching against NS.
+Names / `External ID 2` / `customer_externalId` exist in the CSVs only as
+bridges *to* a C-number.
+
+```text
+subscription → customer   by C-number: subs NETSUITE_ACCOUNT_NUMBER
+                          → NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL
+                          → customer CSV `C-number` (bridged by Customer name)
+billing acct → customer   by C-number: its OWNING SUB's C-number
+                          (BA externalId minus `_BA` → sub → columns above)
+                          → else customer CSV `C-number` (via customer_externalId)
+subscription → billing    by externalId KEY (not a customer lookup):
+                          `<sub External ID>_BA` (= `<deal>_<subid>_BA`)
+```
+
+Because the BA takes its C-number from its own sub, a sub and its BA can never
+bind to different customers. `validate.py` mirrors this exactly (checks 1–5.1),
+and check 5.1 blocks a BA whose CSV `subsidiary_id` differs from its resolved
+customer's NS subsidiary (a hard NS 400 otherwise).
+
+**The loop for NEW customers:** a customer created by this loader gets an
+NS-assigned C-number the exports don't know yet, so its subs/BAs cannot attach
+until the warehouse knows it. The flow is:
+
+```text
+load customer → warehouse picks up its NS C-number → re-export subs
+→ --validate (checks 1–4 confirm resolution) → load BA / pricePlan / subscription
+```
+
+A record with no resolvable C-number is **skipped with an error** — never
+attached by any other key (see the data-integrity rule).
 
 ---
 
@@ -447,7 +486,7 @@ or `.env.prod`) and you are in the repo root.
 
 `config.py` (paths, creds, `LOAD_REVISION`, `apply_revision`) · `netsuite_client.py`
 (OAuth1 signing, REST, 3-tier ID retrieval) · `state_tracker.py` (SQLite idempotency
-and ID chaining) · `customer_resolver.py` (C-number / externalId → NS id, shared by
+and ID chaining) · `customer_resolver.py` (C-number → NS id — the ONLY attach key, shared by
 the subs and BA loaders) · `pricing_shape.py` (the shape hash the dedup tooling keys
 on) · `loaders/base.py` and the five entity loaders under `loaders/`
 (`customer`, `billing_account`, `price_plan`, `subscription`, `one_off`) ·

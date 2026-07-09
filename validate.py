@@ -10,10 +10,11 @@ Design notes (see refactors/REFACTOR-PLAN.md):
     no state DB). NetSuite is the single source of truth, queried by externalId.
   - LOAD_REVISION is frozen at _rvn_prod_01. We reconcile by *exact* externalId
     sets derived from the CSVs (chunked `WHERE externalid IN (...)`), not LIKE.
-  - CUSTOMERS are keyed in prod by their RAW `External ID 2` (NO revision
-    suffix) — they pre-exist in NS. Only BA / subscription / pricePlan / oneOff
-    carry the suffix. Customer resolution here is therefore RAW. See the memory
-    note `customer-extid-raw-in-prod`.
+  - CUSTOMERS resolve by C-number (NS `entityid`) ONLY — convention since
+    2026-07-09, mirroring customer_resolver.CustomerResolver. No externalId or
+    company-name resolution against NS; names/External ID 2 are only bridges to
+    a C-number. A customer created by this loader resolves only once the
+    warehouse export carries its NS-assigned C-number (check 4 surfaces those).
 
 Severity:
   BLOCKER  — would fail or silently skip the load. Exit code 1 if any present.
@@ -56,6 +57,7 @@ CHECK_ENTITY = {
     3: "subscription",
     4: "subscription",
     5: "billingAccount",
+    5.1: "billingAccount",
     6: "subscription",
     7: "subscription",
     8: "billingAccount",
@@ -70,7 +72,7 @@ CHECK_ENTITY = {
 # Severity each check emits. Used so a "not evaluated" finding (missing input)
 # carries the check's native severity — you can't confirm a BLOCKER check is
 # safe if its input is absent, so that absence must itself block.
-BLOCKER_CHECKS = {1, 2, 5, 7, 8, 9, 12, 13}
+BLOCKER_CHECKS = {1, 2, 5, 5.1, 7, 8, 9, 12, 13}
 
 # CSV inputs each check requires to produce a meaningful result. If any are
 # missing (None from _read_csv — a bad path in config), run() skips the check
@@ -90,6 +92,7 @@ CHECK_REQUIRED_CSVS = {
     3: {"subscription", "customer"},
     4: {"subscription", "customer"},
     5: {"billingAccount"},
+    5.1: {"billingAccount"},
     6: {"subscription"},
     7: {"subscription", "customer"},
     8: {"subscription", "billingAccount"},
@@ -110,6 +113,7 @@ CHECK_GROUP = {
     3: "CUSTOMERS — subscription resolves to an NS customer",
     4: "CUSTOMERS — subscription resolves to an NS customer",
     5: "BILLING ACCOUNTS — customer link",
+    5.1: "BILLING ACCOUNTS — customer link",
     6: "BILLING ACCOUNTS — every deal has one (load vs create)",
     7: "SUBSCRIPTIONS — subsidiary match",
     8: "BILLING ACCOUNTS — start dates",
@@ -126,7 +130,8 @@ CHECK_TITLE = {
     2: "Subs export's own C-number is valid in NS",
     3: "Sub customer already in NS (skip load) vs must be created (load)",
     4: "Flagged customer: truly absent from NS vs in NS under a different id",
-    5: "BA customer resolves to an NS customer (by C-number via customer CSV)",
+    5: "BA customer resolves to an NS customer (by C-number ONLY)",
+    5.1: "BA subsidiary_id == its customer's NS subsidiary",
     6: "Every sub has its own Billing Account (<deal>_<subid>_BA), loaded or in NS",
     7: "Sub subsidiary == its customer's NS subsidiary",
     8: "BA startDate present and <= earliest sub Start Date for the deal",
@@ -142,9 +147,9 @@ CHECK_TITLE = {
 # in the report so the output reads clearly without cross-referencing the code.
 CHECK_EXPLAIN = {
     1: "Can each sub's customer be resolved to a real NS customer by C-number "
-    "(subs C-number, else customers-CSV)? Clean = already in NS (no need to "
-    "create it). Also WARNS if the resolved NS customer's NAME doesn't match — "
-    "i.e. the C-number points at the wrong company.",
+    "(subs C-number, else customers-CSV)? C-number is the ONLY key the loaders "
+    "attach by. Clean = already in NS. Also WARNS if the resolved NS customer's "
+    "NAME doesn't match — i.e. the C-number points at the wrong company.",
     2: "Validates the C-number the subs export ITSELF carries "
     "(NETSUITE_ACCOUNT_NUMBER*) actually exists in NS — catches a wrong/stale "
     "account number even when check 1 resolved the customer another way. Silent "
@@ -152,11 +157,17 @@ CHECK_EXPLAIN = {
     3: "Per distinct customer: already in NS (skip — don't load it) or NOT in "
     "NS (must be created/loaded first). Warns only on the ones to create; clean "
     "= every sub customer already exists in NS.",
-    4: "For customers check 3 couldn't resolve by id: is one in NS by company "
-    "name anyway? Separates 'truly absent — create it' from 'in NS but the "
-    "C-number / External ID 2 bridge failed — reconcile, don't duplicate'.",
-    5: "Does each billing account point at a real NS customer? Bridges its "
-    "MP_HubSpot id → customers CSV → C-number → NS.",
+    4: "For customers check 3 couldn't resolve by C-number: is one in NS by "
+    "company name anyway? Separates 'truly absent — create it' from 'in NS but "
+    "the export lacks its C-number — carry it in the export, don't duplicate'. "
+    "Informational only — names are never used to attach.",
+    5: "Does each billing account's customer resolve by C-number? Sourced from "
+    "its OWNING SUB's NETSUITE_ACCOUNT_NUMBER* (via the `<sub>_BA` key), else "
+    "the customer CSV's C-number bridged from customer_externalId. C-number is "
+    "the ONLY NS key — no externalId/name resolution.",
+    5.1: "Does each BA's CSV subsidiary_id match the NS subsidiary of the "
+    "customer it will bind to? A mismatch is a hard NS 400 at load ('Invalid "
+    "Field Value ... subsidiary' — the B&M BA failure of 2026-07-09).",
     6: "Per SUB: is there a `<sub External ID>_BA` (the `<deal>_<subid>_BA` "
     "convention) — queued in the billing CSV or already in NS? Warns for subs "
     "with none (they load unbilled). A customer's OTHER billing accounts — even "
@@ -322,28 +333,24 @@ class Validator:
                 # Guard against the preflight's hard crash on a missing CSV.
                 print(f"  ⚠ {label} CSV not found, skipping its checks: {path}")
 
-        # Customer-CSV bridges. The C-number (CUSTOMER_CNUM_COL) is the key that
-        # actually resolves to NS; the other maps exist to *reach* it from a name
-        # (subs) or from an External ID 2 / MP_HubSpot id (billing accounts).
-        #   name_to_ext   : Company Name (UPPER) → External ID 2 (for messages /
-        #                   "is this name even in the customer CSV?")
-        #   name_to_cnum  : Company Name (UPPER) → C-number  (resolve subs)
-        #   ext2_to_cnum  : External ID 2        → C-number  (resolve BAs, which
-        #                   only carry customer_externalId = MP_HubSpot_*)
-        # ext2_to_cnum maps every row that has an External ID 2, even when its
-        # C-number is blank, so a check can tell "no customer-CSV row" (key
-        # absent) apart from "row exists but has no C-number" (value "").
-        self.name_to_ext = {}
+        # Customer-CSV bridges. The C-number (CUSTOMER_CNUM_COL) is the ONLY key
+        # that resolves to NS (convention 2026-07-09); these maps exist purely to
+        # *reach* a C-number from a name (subs) or from an External ID 2 /
+        # MP_HubSpot id (billing accounts) — never to query NS themselves.
+        #   name_to_cnum  : Company Name (UPPER) → C-number
+        #   ext2_to_cnum  : External ID 2        → C-number
+        #   ext2_to_name  : External ID 2        → Company Name (readable findings)
+        # Both cnum maps keep rows whose C-number is blank (value ""), so a check
+        # can tell "no customer-CSV row" (key absent) apart from "row exists but
+        # has no C-number".
         self.name_to_cnum = {}
         self.ext2_to_cnum = {}
-        self.ext2_to_name = {}  # External ID 2 → Company Name (for readable BA findings)
+        self.ext2_to_name = {}
         for r in self.customers or []:
             raw_nm = (r.get("Company Name") or "").strip()
             nm = raw_nm.upper()
             ext = (r.get("External ID 2") or "").strip()
             cnum = (r.get(CUSTOMER_CNUM_COL) or "").strip()
-            if nm and ext:
-                self.name_to_ext[nm] = ext
             if nm:
                 self.name_to_cnum[nm] = cnum
             if ext:
@@ -358,18 +365,14 @@ class Validator:
                 self.sub_groups[ext].append(r)
 
         # --- NS lookups (populated lazily in run()) ---------------------
-        # Customers are resolved two ways, because two populations exist:
-        #   ns_by_cnum : entityid (C-number) → record. Catches PRE-EXISTING NS
-        #     customers (the customer CSV carries their C-number).
-        #   ns_by_ext  : externalid → record. Catches customers THIS LOADER
-        #     created — it keys them by apply_revision(External ID 2)
-        #     (e.g. MP_HubSpot_..._rvn_prod_01), and NS auto-assigns their
-        #     entityid, so they have NO C-number in the CSV and are invisible to
-        #     the C-number path. Without this, a freshly-loaded customer is
-        #     reported "not in NS" even though it exists. Both hold
-        #     {id, subsidiary, externalid, companyname, entityid}.
+        # Customers resolve by C-number (entityid) ONLY — convention since
+        # 2026-07-09, matching customer_resolver.CustomerResolver. ns_by_cnum
+        # holds {id, subsidiary, externalid, companyname, entityid} per
+        # entityid. NOTE the consequence: a customer THIS loader just created
+        # has an NS-assigned C-number the CSVs don't carry yet, so it will not
+        # resolve until the warehouse export includes it — check 4's by-name
+        # lookup surfaces those as "in NS — reconcile the C-number".
         self.ns_by_cnum: dict[str, dict] = {}
-        self.ns_by_ext: dict[str, dict] = {}
         # UPPER(companyname) → record. Last-resort lookup for check 4 only:
         # tells "truly absent from NS" apart from "in NS but the id bridge failed".
         self.ns_by_name: dict[str, dict] = {}
@@ -390,23 +393,12 @@ class Validator:
         report and the exit code."""
         self.findings.append(Finding(check, severity, ident, message))
 
-    def resolve_customer_ext(self, raw_name: str):
-        """sub/BA Customer name → canonical (via alias map) → External ID 2.
-
-        Retained only for messages / "is this name in the customer CSV at all?"
-        — NOT for NS resolution (External ID 2 is a HubSpot id absent from NS).
-        Returns None if the name matches no customer-CSV row.
-        """
-        name = (raw_name or "").strip()
-        canonical = config.CUSTOMER_NAME_ALIASES.get(name.upper(), name)
-        return self.name_to_ext.get(canonical.upper())
-
     def name_cnum(self, raw_name: str) -> str:
         """sub/BA Customer name → canonical (alias map) → C-number, or ''.
 
         Returns '' when the name matches no customer-CSV row, or matches a row
         whose C-number column is blank — callers that need to tell those apart
-        check ``resolve_customer_ext`` (None = no row) separately.
+        test ``name in self.name_to_cnum`` (absent = no row) separately.
         """
         name = (raw_name or "").strip()
         canonical = config.CUSTOMER_NAME_ALIASES.get(name.upper(), name)
@@ -461,31 +453,6 @@ class Validator:
                     "entityid": row.get("entityid"),
                 }
 
-    def _fetch_ns_by_ext(self, ext_ids):
-        """Resolve customers in NS by their externalId and cache them.
-
-        Populates ``self.ns_by_ext`` ({externalid → {id, subsidiary, externalid,
-        companyname, entityid}}). ``ext_ids`` should include both the RAW
-        External ID 2 and its revisioned form (apply_revision) — this loader
-        creates customers under the revisioned externalId, while any pre-existing
-        prod customer keyed by a raw External ID 2 is caught by the raw form.
-        Chunked ``WHERE externalid IN (...)``; only ids that exist become keys.
-        """
-        ids = sorted({e for e in ext_ids if e})
-        for chunk in _chunk(ids):
-            q = (
-                "SELECT id, entityid, subsidiary, externalid, companyname "
-                f"FROM customer WHERE externalid IN ({_sql_in(chunk)})"
-            )
-            for row in self.client.suiteql_query(q):
-                self.ns_by_ext[row["externalid"]] = {
-                    "id": row.get("id"),
-                    "subsidiary": row.get("subsidiary"),
-                    "externalid": row.get("externalid"),
-                    "companyname": row.get("companyname"),
-                    "entityid": row.get("entityid"),
-                }
-
     def _fetch_ns_by_name(self, names):
         """Resolve customers in NS by exact (case-insensitive) company name.
 
@@ -532,25 +499,37 @@ class Validator:
                 if row.get("externalid"):
                     self.ns_ba_extids.add(row["externalid"])
 
-    def customer_ns_record(self, cnum: str, ext2: str):
-        """The NS customer record for (C-number, External ID 2), or None.
+    def customer_ns_record(self, cnum: str):
+        """The NS customer record for a C-number, or None.
 
-        Tries BOTH resolution paths and returns the first hit:
-          1. C-number (entityid) — pre-existing NS customers.
-          2. External ID 2, revisioned first then raw — customers THIS loader
-             created (keyed by apply_revision(External ID 2)), then any
-             pre-existing customer keyed by a raw External ID 2.
-        A customer counts as "in NS" iff this returns non-None. ``ext2`` may be
-        None/"" (e.g. a sub customer with no customer-CSV row); only the C-number
-        path is then tried.
+        C-number (entityid) is the ONLY resolution key — convention since
+        2026-07-09; matches ``customer_resolver.CustomerResolver`` exactly. A
+        customer counts as "in NS" iff this returns non-None. NOTE: a customer
+        this loader just CREATED gets an NS-assigned C-number the CSVs don't
+        carry yet, so it will NOT resolve until the warehouse export includes
+        that C-number (check 4 surfaces those as "in NS by name — reconcile").
         """
         if cnum and cnum in self.ns_by_cnum:
             return self.ns_by_cnum[cnum]
-        if ext2:
-            for cand in (config.apply_revision(ext2), ext2):
-                if cand in self.ns_by_ext:
-                    return self.ns_by_ext[cand]
         return None
+
+    def ba_cnum(self, ba_row: dict) -> str:
+        """C-number for a BA row: its sub's C-number, else the customer-CSV bridge.
+
+        Mirrors ``BillingAccountLoader._ba_cnum``: `<sub External ID>_BA` →
+        sub group in the subs CSV → its C-number (``sub_cnum``); falling back to
+        ``customer_externalId`` → customer CSV row → its C-number. Returns ''
+        when neither source yields one.
+        """
+        ba_ext = (ba_row.get("externalId") or "").strip()
+        if ba_ext.endswith("_BA"):
+            grp = self.sub_groups.get(ba_ext[: -len("_BA")])
+            if grp:
+                cnum = self.sub_cnum(grp)
+                if cnum:
+                    return cnum
+        cust_ext = (ba_row.get("customer_externalId") or "").strip()
+        return self.ext2_to_cnum.get(cust_ext, "") or ""
 
     def _fetch_ns_priceplans(self, rev_ext_ids):
         """Cache which price plans already exist in NS, for check 7.
@@ -618,28 +597,27 @@ class Validator:
     def check_1_sub_customer(self):
         """Check 1: every subscription's customer resolves to the CORRECT NS customer.
 
-        Resolution per sub group via ``customer_ns_record``: by C-number
+        Resolution per sub group via ``customer_ns_record``: by C-number ONLY
         (``sub_cnum``: subs NETSUITE_ACCOUNT_NUMBER / _COMPANY_LEVEL, else the
-        customer CSV's C-number by name) OR by External ID 2 (revisioned/raw) —
-        the latter catches customers THIS loader created under
-        apply_revision(External ID 2), which have no C-number in the CSV.
+        customer CSV's C-number by name). No externalId or name resolution —
+        this mirrors the loaders exactly (convention 2026-07-09).
 
         Severities:
           • resolved AND the NS customer's name matches → clean.
           • resolved but the NS name does NOT match the sub's Customer → WARNING:
-            the C-number/externalId points at the WRONG customer (e.g. a C-number
-            that belongs to a different company in this env). Catches the wrong-
+            the C-number points at the WRONG customer (e.g. a C-number that
+            belongs to a different company in this env). Catches the wrong-
             binding the load would otherwise make silently.
-          • a concrete C-number was supplied but neither it nor the externalId is
-            in NS → BLOCKER (an id that should exist but doesn't).
-          • no C-number at all and not loaded under its externalId → WARNING (the
-            customer isn't in NS yet; create/load it — the sub would be skipped).
+          • a concrete C-number was supplied but it isn't in NS → BLOCKER (an id
+            that should exist but doesn't — wrong/stale export).
+          • no C-number at all → BLOCKER: with C-number-only attach, the sub
+            CANNOT resolve its customer; the loader will skip it. Fix the export
+            (or create the customer and re-export with its NS C-number).
         """
         for ext, grp in self.sub_groups.items():
             name = (grp[0].get("Customer") or "").strip()
             cnum = self.sub_cnum(grp)
-            ext2 = self.resolve_customer_ext(name)
-            rec = self.customer_ns_record(cnum, ext2)
+            rec = self.customer_ns_record(cnum)
             if rec:
                 ns_name = rec.get("companyname") or ""
                 if ns_name and not self._names_match(name, ns_name):
@@ -648,32 +626,37 @@ class Validator:
                         WARNING,
                         ext,
                         f"customer {name!r} resolved to NS customer {ns_name!r} "
-                        f"(id {rec.get('id')}) — names DON'T match; the C-number / "
-                        f"externalId likely points at the WRONG customer. Verify "
-                        f"before loading (the sub would bind to the wrong account).",
+                        f"(id {rec.get('id')}, C-number {cnum}) — names DON'T "
+                        f"match; the C-number likely points at the WRONG customer. "
+                        f"Verify before loading (the sub would bind to the wrong "
+                        f"account).",
                     )
-                continue  # in NS (by C-number or loaded externalId)
+                continue  # in NS by C-number
             if cnum:
                 self.add(
                     1,
                     BLOCKER,
                     ext,
-                    f"customer {name!r}: C-number {cnum} not found in NS "
-                    f"(and not loaded under its externalId).",
+                    f"customer {name!r}: C-number {cnum} not found in NS — "
+                    f"wrong/stale C-number; the sub cannot attach.",
                 )
             else:
+                has_row = (
+                    config.CUSTOMER_NAME_ALIASES.get(name.upper(), name).upper()
+                    in self.name_to_cnum
+                )
                 why = (
-                    f"customer-CSV {CUSTOMER_CNUM_COL!r} is blank and not yet "
-                    f"loaded"
-                    if ext2 is not None
+                    f"customer-CSV {CUSTOMER_CNUM_COL!r} is blank"
+                    if has_row
                     else "no customer-CSV row"
                 )
                 self.add(
                     1,
-                    WARNING,
+                    BLOCKER,
                     ext,
-                    f"customer {name!r}: not in NS ({why}); create/load it before "
-                    f"its sub (otherwise the sub is skipped). Verify manually.",
+                    f"customer {name!r}: no C-number anywhere (subs export blank; "
+                    f"{why}). Customers attach by C-number ONLY — the loader "
+                    f"would skip this sub. Fix the export.",
                 )
 
     def check_2_subs_cnumber_valid(self):
@@ -713,13 +696,13 @@ class Validator:
 
         The explicit load-vs-skip view, deduplicated per customer (check 1 is
         per deal and frames this as resolution success/failure). For each
-        distinct sub Customer, resolve via ``customer_ns_record`` (by C-number OR
-        by loaded External ID 2) and ask: is it in NS?
+        distinct sub Customer, resolve via ``customer_ns_record`` (by C-number
+        ONLY) and ask: is it in NS?
           • IN NS  → the customer already exists; skip loading it (no finding).
-            Recognises customers this loader just created (keyed by revisioned
-            External ID 2), so they stop showing up as "to create" after a load.
-          • NOT in NS → warns once, naming the customer: it must be created/
-            loaded before its subscription, or the sub is skipped at load.
+          • NOT resolvable → warns once, naming the customer: create/load it,
+            then RE-EXPORT so the subs carry its NS-assigned C-number —
+            with C-number-only attach, a freshly-created customer resolves only
+            once the export knows its C-number.
         A customer counts as IN NS if ANY of its deals resolves. WARNING-only by
         design — it's a "here's your create list", not a gate (check 1 gates).
         Clean = every sub customer already exists in NS, nothing to create.
@@ -729,9 +712,7 @@ class Validator:
             name = (grp[0].get("Customer") or "").strip()
             if not name:
                 continue
-            resolved = self.customer_ns_record(
-                self.sub_cnum(grp), self.resolve_customer_ext(name)
-            ) is not None
+            resolved = self.customer_ns_record(self.sub_cnum(grp)) is not None
             status[name] = status.get(name, False) or resolved
         for name, in_ns in sorted(status.items()):
             if not in_ns:
@@ -739,36 +720,36 @@ class Validator:
                     3,
                     WARNING,
                     name,
-                    f"customer {name!r}: NOT in NS — must be created/loaded before "
-                    f"its subscription (otherwise the sub is skipped at load). "
-                    f"Customers not listed here already exist in NS (skip load).",
+                    f"customer {name!r}: not resolvable by C-number — create/load "
+                    f"it, then re-export so the subs carry its NS C-number "
+                    f"(otherwise its sub is skipped at load). Customers not "
+                    f"listed here already exist in NS (skip load).",
                 )
 
     def check_4_customer_name_in_ns(self):
         """Check 4 (WARNING): for customers UNRESOLVED by id, is one in NS by name?
 
         The companion to check 3 that tells two very different situations apart,
-        for each customer that could NOT be resolved by C-number or externalId:
-          • a customer with that company name EXISTS in NS → it IS in NS; only the
-            id bridge (C-number / External ID 2) failed. Do NOT create a
-            duplicate — reconcile the identifiers. Reports the NS id / entityid /
-            externalid so the operator can fix the mapping.
+        for each customer that could NOT be resolved by C-number:
+          • a customer with that company name EXISTS in NS → it IS in NS; the
+            export just doesn't carry its C-number (typical for customers this
+            loader created — NS assigned their C-number after the export). Do
+            NOT create a duplicate — put the reported entityid into the export.
           • no NS customer with that exact name → genuinely absent; create/load it.
-        Only customers check 3 would flag are considered (resolved-by-id ones are
-        skipped). EXACT (case-insensitive) name match — see _fetch_ns_by_name.
+        Only customers check 3 would flag are considered (C-number-resolved ones
+        are skipped). EXACT (case-insensitive) name match — see _fetch_ns_by_name.
+        The by-name lookup is INFORMATIONAL only; it is never used to attach.
         """
         resolved_by_id: dict[str, bool] = {}
         for ext, grp in self.sub_groups.items():
             name = (grp[0].get("Customer") or "").strip()
             if not name:
                 continue
-            rec = self.customer_ns_record(
-                self.sub_cnum(grp), self.resolve_customer_ext(name)
-            )
+            rec = self.customer_ns_record(self.sub_cnum(grp))
             resolved_by_id[name] = resolved_by_id.get(name, False) or (rec is not None)
         for name, by_id in sorted(resolved_by_id.items()):
             if by_id:
-                continue  # in NS by id — fine (check 1 / 3 cover it)
+                continue  # in NS by C-number — fine (check 1 / 3 cover it)
             alias = config.CUSTOMER_NAME_ALIASES.get(name.upper(), name).upper()
             hit = self.ns_by_name.get(alias)
             if hit:
@@ -776,69 +757,90 @@ class Validator:
                     4,
                     WARNING,
                     name,
-                    f"customer {name!r}: NOT resolvable by C-number/externalId, but "
-                    f"a customer named {hit.get('companyname')!r} EXISTS in NS "
+                    f"customer {name!r}: no C-number resolves, but a customer "
+                    f"named {hit.get('companyname')!r} EXISTS in NS "
                     f"(id {hit.get('id')}, entityid {hit.get('entityid')}, "
-                    f"externalid {hit.get('externalid')!r}). It IS in NS — reconcile "
-                    f"its C-number / External ID 2; do NOT create a duplicate.",
+                    f"externalid {hit.get('externalid')!r}). It IS in NS — carry "
+                    f"C-number {hit.get('entityid')} in the export; do NOT create "
+                    f"a duplicate.",
                 )
             else:
                 self.add(
                     4,
                     WARNING,
                     name,
-                    f"customer {name!r}: not in NS by C-number, externalId, OR exact "
-                    f"company name — genuinely absent. Create/load it (if you "
-                    f"expected it to exist, check the NS name spelling).",
+                    f"customer {name!r}: not in NS by C-number OR exact company "
+                    f"name — genuinely absent. Create/load it, then re-export with "
+                    f"its NS C-number (if you expected it to exist, check the NS "
+                    f"name spelling).",
                 )
 
     def check_5_ba_customer(self):
-        """Check 5 (BLOCKER): every BA points at a real NS customer.
+        """Check 5 (BLOCKER): every BA's customer resolves by C-number.
 
-        The billing CSV carries only ``customer_externalId`` (an MP_HubSpot id).
-        Resolution via ``customer_ns_record``: by C-number (bridged through the
-        customer CSV: customer_externalId → External ID 2 row → its C-number) OR
-        by the externalId directly (revisioned/raw) — the latter catches a
-        customer this loader created under apply_revision(External ID 2). Blocks
-        only when neither path resolves, with a distinct, named reason so the
+        Mirrors the BA loader exactly (``ba_cnum``): the owning SUB's C-number
+        (BA externalId minus ``_BA`` → sub group → NETSUITE_ACCOUNT_NUMBER*),
+        else the customer CSV's C-number bridged from ``customer_externalId``.
+        C-number is the ONLY NS key — a BA with no resolvable C-number is
+        skipped by the loader, so it blocks here, with a named reason so the
         operator knows which link broke.
         """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             cust_ext = (r.get("customer_externalId") or "").strip()
-            if not cust_ext:
-                self.add(5, BLOCKER, ba_ext, "BA customer_externalId is blank.")
-                continue
-            cnum = self.ext2_to_cnum.get(cust_ext)
-            if self.customer_ns_record(cnum, cust_ext):
-                continue  # resolved (by C-number or loaded externalId)
+            cnum = self.ba_cnum(r)
+            if self.customer_ns_record(cnum):
+                continue  # resolved by C-number
             # Customer name for eyeballing (from the customer CSV by External ID 2).
             name = self.ext2_to_name.get(cust_ext)
             who = f"{name!r} ({cust_ext})" if name else f"{cust_ext!r}"
-            if cnum is None:
+            if cnum:
                 self.add(
                     5,
                     BLOCKER,
                     ba_ext,
-                    f"BA customer {who} matches no customer-CSV row and is not in "
-                    f"NS by externalId.",
-                )
-            elif not cnum:
-                self.add(
-                    5,
-                    BLOCKER,
-                    ba_ext,
-                    f"BA customer {who}: customer-CSV row has no C-number "
-                    f"('{CUSTOMER_CNUM_COL}' blank) and not loaded under its "
-                    f"externalId.",
+                    f"BA customer {who} → C-number {cnum} not found in NS — "
+                    f"wrong/stale C-number; the BA cannot attach.",
                 )
             else:
                 self.add(
                     5,
                     BLOCKER,
                     ba_ext,
-                    f"BA customer {who} → C-number {cnum} not found in NS "
-                    f"(and not loaded under its externalId).",
+                    f"BA customer {who}: no C-number anywhere (owning sub carries "
+                    f"none; customer-CSV bridge yields none). BAs attach by "
+                    f"C-number ONLY — the loader would skip this BA. Fix the "
+                    f"export.",
+                )
+
+    def check_5_1_ba_subsidiary(self):
+        """Check 5.1 (BLOCKER): BA subsidiary_id == its customer's NS subsidiary.
+
+        NetSuite rejects a billing account whose ``subsidiary`` differs from its
+        customer's ("Invalid Field Value 12 for the following field: subsidiary"
+        — the exact 400 the B&M BA hit on 2026-07-09 when its C-number resolved
+        to a subsidiary-13 customer). The loader deliberately does NOT rewrite
+        the CSV subsidiary (data-integrity rule), so this check gates instead:
+        for every BA whose customer resolves (check 5 owns the ones that don't),
+        compare the CSV ``subsidiary_id`` to the NS customer's subsidiary and
+        block on mismatch.
+        """
+        for r in self.bas or []:
+            ba_ext = (r.get("externalId") or "").strip()
+            rec = self.customer_ns_record(self.ba_cnum(r))
+            if not rec:
+                continue  # unresolvable customer — check 5 owns it
+            csv_sub = (r.get("subsidiary_id") or "").strip()
+            ns_sub = rec.get("subsidiary")
+            if csv_sub and str(ns_sub) != csv_sub:
+                self.add(
+                    5.1,
+                    BLOCKER,
+                    ba_ext,
+                    f"BA subsidiary_id {csv_sub} != customer's NS subsidiary "
+                    f"{ns_sub} (customer id {rec.get('id')}) — NS rejects this "
+                    f"with 'Invalid Field Value ... subsidiary'. Fix the export "
+                    f"or the customer binding.",
                 )
 
     def check_6_deal_has_ba(self):
@@ -869,9 +871,7 @@ class Validator:
         for ext in sorted(self.sub_groups):
             grp = self.sub_groups[ext]
             name = (grp[0].get("Customer") or "").strip()
-            if not self.customer_ns_record(
-                self.sub_cnum(grp), self.resolve_customer_ext(name)
-            ):
+            if not self.customer_ns_record(self.sub_cnum(grp)):
                 continue  # customer not in NS — checks 1 / 3 / 4 own this
             if ext in ba_csv_subs:
                 continue  # a `<sub>_BA` row is queued in the billing CSV
@@ -899,7 +899,7 @@ class Validator:
             header = grp[0]
             name = (header.get("Customer") or "").strip()
             cnum = self.sub_cnum(grp)
-            rec = self.customer_ns_record(cnum, self.resolve_customer_ext(name))
+            rec = self.customer_ns_record(cnum)
             if rec is None:
                 continue  # already flagged by check 1
             sub_subsidiary_name = (header.get("Subsidiary") or "").strip()
@@ -1134,10 +1134,9 @@ class Validator:
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
             cust_ext = (r.get("customer_externalId") or "").strip()
-            cnum = self.ext2_to_cnum.get(cust_ext)
-            cust = self.customer_ns_record(cnum, cust_ext)
+            cust = self.customer_ns_record(self.ba_cnum(r))
             if not cust:
-                continue  # flagged by check 2
+                continue  # flagged by check 5
             cid = cust.get("id")
             missing = []
             if cid not in self.addr_billing:
@@ -1223,9 +1222,9 @@ class Validator:
         ]
 
         # Prefetch NS data only for the checks we'll run. All customer-touching
-        # checks resolve via the C-number / externalId maps.
+        # checks resolve via the C-number map (the only NS key).
         needs_customers = any(
-            c in active_checks for c in (1, 2, 3, 4, 5, 6, 7, 12)
+            c in active_checks for c in (1, 2, 3, 4, 5, 5.1, 6, 7, 12)
         )
         needs_names = 4 in active_checks
         needs_ba_extids = 6 in active_checks
@@ -1250,7 +1249,7 @@ class Validator:
                 if nc:
                     cnums.add(nc)
             for r in self.bas or []:
-                c = self.ext2_to_cnum.get((r.get("customer_externalId") or "").strip())
+                c = self.ba_cnum(r)
                 if c:
                     cnums.add(c)
             print(
@@ -1258,31 +1257,9 @@ class Validator:
                 f"C-numbers (entityid)…"
             )
             self._fetch_ns_by_cnum(cnums)
-
-            # Also resolve by externalId — both raw and revisioned — so customers
-            # THIS loader created (keyed by apply_revision(External ID 2)) are
-            # recognised as in-NS even though they have no C-number in the CSV.
-            # External ID 2 comes from the customer CSV (subs resolve via name)
-            # and from the BAs' customer_externalId.
-            ext_ids = set()
-            for ext2 in self.ext2_to_cnum:  # every External ID 2 in the customer CSV
-                ext_ids.add(ext2)
-                ext_ids.add(config.apply_revision(ext2))
-            for grp in self.sub_groups.values():
-                ext2 = self.resolve_customer_ext(grp[0].get("Customer"))
-                if ext2:
-                    ext_ids.add(ext2)
-                    ext_ids.add(config.apply_revision(ext2))
-            for r in self.bas or []:
-                ext2 = (r.get("customer_externalId") or "").strip()
-                if ext2:
-                    ext_ids.add(ext2)
-                    ext_ids.add(config.apply_revision(ext2))
-            print(
-                f"  · querying NS for {len(ext_ids)} customer externalIds "
-                f"(raw + revisioned)…"
-            )
-            self._fetch_ns_by_ext(ext_ids)
+            # C-number is the ONLY NS key (convention 2026-07-09) — no
+            # externalId or name resolution here. Check 4's by-name lookup is
+            # informational only ("in NS under a different id — reconcile").
 
         if needs_names:
             # For check 4: NS lookup by exact company name (alias-resolved,
@@ -1339,13 +1316,7 @@ class Validator:
                 )
 
         if needs_addresses:
-            # Both customer maps — a BA's customer may be resolved either way.
-            cids = {
-                c["id"]
-                for m in (self.ns_by_cnum, self.ns_by_ext)
-                for c in m.values()
-                if c.get("id")
-            }
+            cids = {c["id"] for c in self.ns_by_cnum.values() if c.get("id")}
             print(f"  · querying NS addresses for {len(cids)} customers…")
             self._fetch_ns_addresses(cids)
 
@@ -1355,6 +1326,7 @@ class Validator:
             3: self.check_3_customer_load_status,
             4: self.check_4_customer_name_in_ns,
             5: self.check_5_ba_customer,
+            5.1: self.check_5_1_ba_subsidiary,
             6: self.check_6_deal_has_ba,
             7: self.check_7_subsidiary,
             8: self.check_8_startdates,

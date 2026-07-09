@@ -144,7 +144,7 @@ the open client-input/data blockers. Update it as tasks are completed.
 |---|---|---|
 | externalId | `externalId` | ✅ |
 | name | `name` | ✅ — ⚠️ NS hard limit: 50 chars. 5 records exceed this. |
-| customer_externalId | `customer.id` | ✅ Resolved via state tracker |
+| customer_externalId | `customer.id` | ✅ Bridge to a C-number only (→ customer CSV row → `C-number`). Since 2026-07-09 the BA's customer resolves by **C-number ONLY** — primarily the owning sub's `NETSUITE_ACCOUNT_NUMBER*` via the `<sub>_BA` key, else this bridge. Never used as an NS lookup key itself. |
 | subsidiary_id | `subsidiary.id` | ✅ Already NS internal ID |
 | currency_id | `currency.id` | ✅ Already NS internal ID |
 | billingSchedule_id | `billingSchedule.id` | ✅ Already NS internal ID |
@@ -162,7 +162,7 @@ the open client-input/data blockers. Update it as tasks are completed.
 - Header fields (same across rows in a group): Subscription Name, Customer, Start Date, End Date, Subsidiary, Currency, etc.
 - **`Subscription Plan` and `Price Book` are NOT guaranteed to be on `rows[0]`** — they appear only on the plan-defining row. Loader uses `next()` scan across all group rows to find the first non-empty value.
 - Line fields (differ per row): Sales Item, Lines: Include, Price Plan External ID (new)
-- Customer resolution chain: `Customer` (name) → customer CSV `Company Name` → `External ID 2` → state tracker → NS internal ID
+- Customer resolution (since 2026-07-09): by **C-number (NS `entityid`) ONLY** — subs `NETSUITE_ACCOUNT_NUMBER` → `NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL` → customer CSV `C-number` (bridged by `Customer` name, alias-resolved). No externalId or company-name resolution against NS; no state tracker. A customer created by this loader resolves only after the warehouse re-exports with its NS-assigned C-number.
 - Billing account resolution: `{External ID}_BA` → state tracker → NS internal ID.
   **Convention (since 2026-07-09): one BA per SUB, keyed on the FULL sub External ID** —
   `<deal>_<subid>_BA` (e.g. sub `498500387059_27401` → BA `498500387059_27401_BA`).
@@ -205,7 +205,7 @@ See the standard load sequence in **[README.md](README.md)** — always
 - **SQLite for state** (not a file/CSV): supports concurrent reads, atomic writes, and SQL queries for reporting.
 - **External IDs as idempotency keys**: NetSuite upserts by externalId, so even if the state DB is lost, re-running won't create duplicates.
 - **3-tier ID retrieval**: because the POST response is 204 with no body, we must parse the Location header (Tier 1). Tiers 2 and 3 are fallbacks for edge cases (timeouts, missing headers).
-- **Customer name → extId mapping for subscriptions**: because the subscription CSV doesn't carry customer external IDs directly, we resolve via company name. All 49 subscription customers match the 68 customer CSV rows.
+- **C-number-only customer attachment (2026-07-09)**: subs and BAs resolve/attach their customer by C-number (NS `entityid`) and nothing else — no externalId, no company-name matching against NS. Names and External ID 2 exist only as bridges to a C-number in the CSVs. Rationale: one env-agnostic key, one resolution path shared by loaders and validator (`customer_resolver.py`), no state-tracker seeding. Consequence: after creating a customer, re-export so the subs carry its NS C-number. (Replaces the old name→External ID 2→state-tracker chain.)
 - **No external dependencies beyond `requests`**: keeps deployment simple. OAuth 1.0 signing is implemented manually (no `requests-oauthlib`).
 - **Per-line classifier as single source of truth** (NEW): all four DDLs filter on `LINE_INDICATOR_RESOLVED.RESOLVED_INDICATOR_TYPE` rather than the static `SALES_ITEM_MAPPING.INDICATOR_TYPE`. Eliminates the cross-file duplicate problem (same HS line emitted to both subs and one-off files) and centralises the slippage + four-exception classification rules.
 - **One Price Plan per sub line** (MVP): externalId convention `MP_PP_<LINE_ITEM_ID>_<slug(NS_SALES_ITEM)>`. Future iteration may dedupe shared plans across lines once client confirms reuse rules.

@@ -87,22 +87,67 @@ class BillingAccountLoader(BaseLoader):
         self.name_truncations: list[str] = []
         self._load_address_maps()
         # Resolve each BA's customer to its NS internal id directly from NS by
-        # C-number / externalId (no state tracker) — so a BA row for a
-        # pre-existing customer loads without seeding.
+        # C-number ONLY (convention since 2026-07-09; no externalId/name
+        # resolution, no state tracker). The C-number comes from the owning
+        # sub's NETSUITE_ACCOUNT_NUMBER* columns, else the customer-CSV bridge.
         self.resolver = CustomerResolver(client)
         self._prefetch_customers()
 
+    def _load_sub_cnums(self) -> dict:
+        """Map each sub External ID → its C-number from the subs export.
+
+        A BA is keyed `<sub External ID>_BA`, so its customer's C-number comes
+        from the OWNING SUB's `NETSUITE_ACCOUNT_NUMBER` (then `_COMPANY_LEVEL`)
+        columns. Returns {} if the subs CSV is absent (bridge-only resolution).
+        """
+        out: dict = {}
+        try:
+            with open(config.SUBSCRIPTIONS_CSV, encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    e = (row.get("External ID") or "").strip()
+                    if not e or out.get(e):
+                        continue
+                    for col in (
+                        "NETSUITE_ACCOUNT_NUMBER",
+                        "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL",
+                    ):
+                        v = (row.get(col) or "").strip()
+                        if v:
+                            out[e] = v
+                            break
+        except FileNotFoundError:
+            logger.warning(
+                "Subs CSV not found at %s; BA customers will resolve via the "
+                "customer-CSV C-number bridge only.",
+                config.SUBSCRIPTIONS_CSV,
+            )
+        return out
+
+    def _ba_cnum(self, ba_ext_id: str, customer_ext_id: str) -> str:
+        """C-number for a BA row: its sub's C-number, else the customer-CSV bridge.
+
+        `<sub External ID>_BA` → sub External ID → subs-export C-number columns;
+        falling back to customer_externalId → customer CSV row → its C-number.
+        Both are SOURCES of the C-number — NS is only ever queried by entityid.
+        """
+        if ba_ext_id.endswith("_BA"):
+            cnum = self._sub_cnum_by_ext.get(ba_ext_id[: -len("_BA")])
+            if cnum:
+                return cnum
+        return self.resolver.ext2_to_cnum.get(customer_ext_id, "") or ""
+
     def _prefetch_customers(self) -> None:
-        """One batched NS query for every customer the billing CSV references."""
-        cnums, ext2s = set(), set()
+        """One batched NS query for every C-number the billing CSV's BAs need."""
+        self._sub_cnum_by_ext = self._load_sub_cnums()
+        cnums = set()
         for r in self.read_csv():
-            ext2 = (r.get("customer_externalId") or "").strip()
-            if ext2:
-                ext2s.add(ext2)
-                c = self.resolver.ext2_to_cnum.get(ext2)
-                if c:
-                    cnums.add(c)
-        self.resolver.prefetch(cnums, ext2s)
+            c = self._ba_cnum(
+                (r.get("externalId") or "").strip(),
+                (r.get("customer_externalId") or "").strip(),
+            )
+            if c:
+                cnums.add(c)
+        self.resolver.prefetch(cnums)
 
     def _load_address_maps(self):
         """
@@ -180,15 +225,18 @@ class BillingAccountLoader(BaseLoader):
             self.name_truncations.append(msg)
 
         # ── Resolve Customer Internal ID ────────────────────────────────
-        # Resolve straight from NS by C-number (bridged from customer_externalId
-        # via the customer CSV) or by the loaded/raw externalId — no state
-        # tracker, so pre-existing customers resolve without seeding.
-        cnum = self.resolver.ext2_to_cnum.get(customer_ext_id)
-        customer_ns_id = self.resolver.resolve(cnum, customer_ext_id)
+        # C-number ONLY (convention since 2026-07-09): the owning sub's
+        # NETSUITE_ACCOUNT_NUMBER* (via the `<sub>_BA` key), else the customer
+        # CSV's C-number bridged from customer_externalId. No externalId or
+        # name resolution — a BA with no resolvable C-number is skipped.
+        cnum = self._ba_cnum(ext_id, customer_ext_id)
+        customer_ns_id = self.resolver.resolve(cnum)
         if not customer_ns_id:
             logger.error(
                 f"Cannot create billing account {ext_id}: customer "
-                f"{customer_ext_id!r} not found in NS (by C-number or externalId)."
+                f"{customer_ext_id!r} has no C-number resolvable in NS "
+                f"({cnum or 'no C-number in subs export or customer CSV'}). "
+                f"BAs attach by C-number only — fix the export."
             )
             return None
 
@@ -312,19 +360,15 @@ class BillingAccountLoader(BaseLoader):
                         return v
             return ""
 
-        cnums, ext2s = set(), set()
+        cnums = set()
         for rows in sub_rows.values():
             cnums.add(
                 _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
             )
-            nm = rows[0].get("Customer", "")
-            nc = self.resolver.name_cnum(nm)
+            nc = self.resolver.name_cnum(rows[0].get("Customer", ""))
             if nc:
                 cnums.add(nc)
-            ex = self.resolver.name_ext(nm)
-            if ex:
-                ext2s.add(ex)
-        self.resolver.prefetch({c for c in cnums if c}, ext2s)
+        self.resolver.prefetch({c for c in cnums if c})
 
         # Which `<sub>_BA` externalIds already exist in NS? (Per sub — a sub
         # links to its BA by `<sub External ID>_BA`, so a customer's OTHER BAs
@@ -347,9 +391,9 @@ class BillingAccountLoader(BaseLoader):
                 _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
                 or self.resolver.name_cnum(name)
             )
-            rec = self.resolver.resolve_record(cnum, self.resolver.name_ext(name))
+            rec = self.resolver.resolve_record(cnum)
             if not (rec and rec.get("id")):
-                continue  # not in NS — the customer load owns this
+                continue  # no C-number resolves in NS — the customer load owns this
             cid = str(rec["id"])
             bill_addr, ship_addr = self._bill_addr_map.get(cid), self._ship_addr_map.get(cid)
             if not (bill_addr and ship_addr):
