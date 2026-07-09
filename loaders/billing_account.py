@@ -271,7 +271,15 @@ class BillingAccountLoader(BaseLoader):
         from loaders.subscription import CURRENCY_MAP
 
         ba_rows = self.read_csv()
-        ba_deals = {_deal_id((r.get("externalId") or "").strip()) for r in ba_rows}
+        # Sub External IDs already covered by a BA row in the billing CSV.
+        # Convention (since 2026-07-09): one BA per SUB, keyed
+        # `<sub External ID>_BA` (i.e. `<deal>_<subid>_BA`) — so coverage is
+        # judged per sub, by stripping the `_BA` suffix, not per deal prefix.
+        ba_covered_subs = {
+            (r.get("externalId") or "").strip()[: -len("_BA")]
+            for r in ba_rows
+            if (r.get("externalId") or "").strip().endswith("_BA")
+        }
         # NS requires a billingSchedule; derive it from the batch's own BAs by
         # frequency (UPPER) so a synthesized BA matches — never invented.
         sched_by_freq: dict[str, set] = defaultdict(set)
@@ -281,14 +289,14 @@ class BillingAccountLoader(BaseLoader):
             if fq and sid:
                 sched_by_freq[fq].add(sid)
 
-        # Group subs by deal.
-        deal_rows: dict[str, list] = defaultdict(list)
+        # Group subs by their FULL External ID (one BA per sub).
+        sub_rows: dict[str, list] = defaultdict(list)
         try:
             with open(config.SUBSCRIPTIONS_CSV, encoding="utf-8-sig") as f:
                 for row in csv.DictReader(f):
                     e = (row.get("External ID") or "").strip()
                     if e:
-                        deal_rows[_deal_id(e)].append(row)
+                        sub_rows[e].append(row)
         except FileNotFoundError:
             logger.error("Subs CSV not found at %s", config.SUBSCRIPTIONS_CSV)
             return {"created": 0, "failed": 0, "skipped": 0}
@@ -305,7 +313,7 @@ class BillingAccountLoader(BaseLoader):
             return ""
 
         cnums, ext2s = set(), set()
-        for rows in deal_rows.values():
+        for rows in sub_rows.values():
             cnums.add(
                 _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
             )
@@ -318,21 +326,22 @@ class BillingAccountLoader(BaseLoader):
                 ext2s.add(ex)
         self.resolver.prefetch({c for c in cnums if c}, ext2s)
 
-        # Which `<deal>_BA` externalIds already exist in NS? (Per deal — a sub
-        # links to its BA by `<deal>_BA`, so a customer's OTHER BAs don't count.)
+        # Which `<sub>_BA` externalIds already exist in NS? (Per sub — a sub
+        # links to its BA by `<sub External ID>_BA`, so a customer's OTHER BAs
+        # don't count.)
         gap_ext_ids = {
-            config.apply_revision(f"{d}_BA")
-            for d in deal_rows
-            if d not in ba_deals
+            config.apply_revision(f"{s}_BA")
+            for s in sub_rows
+            if s not in ba_covered_subs
         }
         existing_ns = self._ba_extids_in_ns(gap_ext_ids)
 
         payloads, skips = [], []
-        for deal, rows in sorted(deal_rows.items()):
-            if deal in ba_deals:
-                continue  # a BA row is already being loaded for this deal
-            if config.apply_revision(f"{deal}_BA") in existing_ns:
-                continue  # this deal's `<deal>_BA` already exists in NS
+        for sub_ext, rows in sorted(sub_rows.items()):
+            if sub_ext in ba_covered_subs:
+                continue  # a BA row is already being loaded for this sub
+            if config.apply_revision(f"{sub_ext}_BA") in existing_ns:
+                continue  # this sub's `<sub>_BA` already exists in NS
             name = (rows[0].get("Customer") or "").strip()
             cnum = (
                 _first(rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL")
@@ -344,37 +353,37 @@ class BillingAccountLoader(BaseLoader):
             cid = str(rec["id"])
             bill_addr, ship_addr = self._bill_addr_map.get(cid), self._ship_addr_map.get(cid)
             if not (bill_addr and ship_addr):
-                skips.append((deal, f"customer {name!r} (id {cid}) has no default "
+                skips.append((sub_ext, f"customer {name!r} (id {cid}) has no default "
                                     f"billing/shipping address in NS — run "
                                     f"repair_customer_addresses.py first"))
                 continue
             currency_name = _first(rows, "Currency")
             currency_id = CURRENCY_MAP.get(currency_name)
             if not currency_id:
-                skips.append((deal, f"currency {currency_name!r} not in CURRENCY_MAP"))
+                skips.append((sub_ext, f"currency {currency_name!r} not in CURRENCY_MAP"))
                 continue
             frequency = _first(rows, "PRICE_BOOK_FREQUENCY").upper()
             if not frequency:
-                skips.append((deal, "PRICE_BOOK_FREQUENCY is blank (won't invent one)"))
+                skips.append((sub_ext, "PRICE_BOOK_FREQUENCY is blank (won't invent one)"))
                 continue
             subsidiary_id = rec.get("subsidiary")
             if not subsidiary_id:
-                skips.append((deal, f"customer {name!r} has no NS subsidiary on record"))
+                skips.append((sub_ext, f"customer {name!r} has no NS subsidiary on record"))
                 continue
             scheds = sched_by_freq.get(frequency)
             if not scheds:
-                skips.append((deal, f"no billing schedule known for frequency "
+                skips.append((sub_ext, f"no billing schedule known for frequency "
                                     f"{frequency!r} (no {frequency} BA in the billing CSV)"))
                 continue
             if len(scheds) > 1:
-                skips.append((deal, f"ambiguous billing schedule for {frequency!r}: "
+                skips.append((sub_ext, f"ambiguous billing schedule for {frequency!r}: "
                                     f"{sorted(scheds)}"))
                 continue
             start_dates = sorted(
                 (r.get("Start Date") or "").strip() for r in rows
                 if (r.get("Start Date") or "").strip()
             )
-            ext_id = config.apply_revision(f"{deal}_BA")
+            ext_id = config.apply_revision(f"{sub_ext}_BA")
             ba_name, _ = _truncate_ba_name(f"{name}_{frequency}_MP_{currency_name}")
             payload = {
                 "externalId": ext_id,
@@ -394,8 +403,8 @@ class BillingAccountLoader(BaseLoader):
                 payload["startDate"] = start_dates[0]
             payloads.append((ext_id, payload, name))
 
-        for deal, reason in skips:
-            logger.warning("create_missing SKIP deal %s: %s", deal, reason)
+        for sub_ext, reason in skips:
+            logger.warning("create_missing SKIP sub %s: %s", sub_ext, reason)
         logger.info(
             "create_missing: %d BA(s) to create, %d skipped", len(payloads), len(skips)
         )

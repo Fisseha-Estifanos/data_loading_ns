@@ -173,7 +173,7 @@ in the *Group* column.
 | 3 | Already in NS (skip) vs must create (load) | Warning | NS | Customers | Per customer: already in NS → skip loading; not in NS → must be created first. Your load-vs-skip roster. |
 | 4 | Truly absent vs in NS under a different id | Warning | NS | Customers | For customers check 3 flagged: genuinely missing (create) vs already in NS under a mismatched id (reconcile — don't create a duplicate). |
 | 5 | BA customer resolves to an NS customer | Blocker | NS + CSV | Billing accounts | Each billing-account row points at a real NS customer (bridged via the customer CSV, or by the loaded externalId). |
-| 6 | Every sub deal has its own `<deal>_BA` | Warning | NS + CSV | Billing accounts | Each subscription **deal** has its own Billing Account `<deal>_BA` — already in NS, or one queued in the billing CSV. Warns when **neither** (that sub would be unbilled). A sub links to `<deal>_BA`, so the customer's *other* BAs don't count. |
+| 6 | Every sub has its own `<deal>_<subid>_BA` | Warning | NS + CSV | Billing accounts | Each **sub** has its own Billing Account keyed `<sub External ID>_BA` (the `<deal>_<subid>_BA` convention) — already in NS, or one queued in the billing CSV. Warns when **neither** (that sub would be unbilled). A sub links to its own `<sub>_BA`, so the customer's *other* BAs — even a sibling sub's — don't count. |
 | 7 | Sub subsidiary == NS customer's subsidiary | Blocker | NS + CSV | Subscriptions | The sub's Subsidiary equals its NS customer's subsidiary. A mismatch is a hard NS 400 at load. |
 | 8 | BA startDate <= earliest sub Start Date | Blocker | CSV | Billing accounts | Each BA's startDate is present and on/before its earliest subscription start (a blank/late start breaks the subs it bills). |
 | 9 | Active sub line Sales Item is mapped | Blocker | CSV | Subscriptions | Every included sub line has a real Sales Item (not blank / not `NOT MAPPED`) — unmapped lines load silently short. |
@@ -181,7 +181,7 @@ in the *Group* column.
 | 11 | Sub line Price Plan exists in the pricing CSV | Warning | CSV | Price plans | Each line's price plan exists in the pricing CSV (i.e. *can* be created). Missing from both NS and CSV = no source row to push. |
 | 12 | BA customer has default billing AND shipping address | Blocker | NS | Billing accounts | Each BA's customer has both a default billing and shipping address in NS — the BA loader needs both or it skips the BA. |
 | 13 | BA required fields present | Blocker | CSV | Billing accounts | Each BA has `subsidiary_id` and `currency_id` filled (mandatory NS references). |
-| 14 | externalId shape sanity (`<deal_id>_BA`) | Warning | CSV | Billing accounts | Each BA externalId follows `<deal_id>_BA`; drift here quietly misaligns BAs and subs. |
+| 14 | externalId shape sanity (`<deal>_<subid>_BA`) | Warning | CSV | Billing accounts | Each BA externalId ends in `_BA` **and** its prefix is a sub External ID in the subs CSV — a BA whose prefix matches no sub would load but never be linked. |
 
 ### Step 7 — Decide what to load
 
@@ -194,7 +194,7 @@ from NS).
 | --- | --- | --- |
 | **Check 3** — already in NS vs must create | Which customers exist in NS (skip) vs which don't | Load only the customers flagged **NOT in NS** |
 | **Check 4** — truly absent vs different id | Whether a flagged customer is genuinely missing or has a mismatched id | Create the truly-absent ones; reconcile the id for the rest (don't duplicate) |
-| **Check 6** — every sub deal has its own `<deal>_BA` | Which sub deals already have a `<deal>_BA` (skip) vs which deals have none | Load the `<deal>_BA` rows in the billing CSV; fill genuine per-deal gaps with `--create-missing-bas` in Step 8 |
+| **Check 6** — every sub has its own `<sub>_BA` | Which subs already have their `<sub External ID>_BA` (skip) vs which have none | Load the `<sub>_BA` rows in the billing CSV; fill genuine per-sub gaps with `--create-missing-bas` in Step 8 |
 
 ### Step 8 — Load in dependency order
 
@@ -211,10 +211,10 @@ python main.py --entity customer --patch-eer        # link Electronic Email Reci
 python main.py --dry-run --entity billingAccount && python main.py --entity billingAccount
 ```
 
-For any sub **deal** whose `<deal>_BA` is **neither** in NS **nor** in the billing
-CSV (flagged by Check 6), the BA loader can synthesize one from the customer's NS
-address book + the subscription — one `<deal>_BA` per gap deal, resolving the
-customer by C-number, no seeding:
+For any **sub** whose `<sub External ID>_BA` is **neither** in NS **nor** in the
+billing CSV (flagged by Check 6), the BA loader can synthesize one from the
+customer's NS address book + the subscription — one `<sub>_BA` per gap sub,
+resolving the customer by C-number, no seeding:
 
 ```bash
 python main.py --dry-run --entity billingAccount --create-missing-bas   # preview the BAs
@@ -371,7 +371,7 @@ Then run Step 8 **without** `--entity customer` (they already exist in NS).
 | `--patch` | — | **Retroactive only.** PATCH already-loaded customers with custom fields. Not needed for new loads (fields are in `build_payload()`). Customer only. |
 | `--patch-eer` | — | Link `custentity_zellis_elec_email_recipients` (two-step POST+PATCH). Run after `--entity customer`. |
 | `--patch-ba-startdate` | — | PATCH billing-account startDates from the CSV where they differ from NS. Use with `--entity billingAccount`. |
-| `--create-missing-bas` | — | Create a `<deal>_BA` for each sub deal that has none (its `<deal>_BA` is neither in NS nor in the billing CSV) from the customer's NS address book + the subscription. Honours `--dry-run`. Use with `--entity billingAccount`. |
+| `--create-missing-bas` | — | Create a `<sub External ID>_BA` for each sub that has none (its `<sub>_BA` is neither in NS nor in the billing CSV) from the customer's NS address book + the subscription. Honours `--dry-run`. Use with `--entity billingAccount`. |
 
 ## Read-only inspector — `prod/prod_check.py`
 
@@ -496,7 +496,7 @@ their **raw** `External ID 2` (no suffix) because they pre-exist in NS.
 
 ```text
 customer:        <External ID 2>            (prod: raw, no suffix)
-billingAccount:  <deal_id>_BA_rvn_prod_01
+billingAccount:  <sub External ID>_BA_rvn_prod_01   (= <deal>_<subid>_BA; pre-2026-07-09 records used <deal_id>_BA)
 pricePlan:       MP_PP_<line>_<slug>_rvn_prod_01
 subscription:    <deal_id>_rvn_prod_01
 oneOff invoice:  <Invoice External ID>_rvn_prod_01

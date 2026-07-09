@@ -127,7 +127,7 @@ CHECK_TITLE = {
     3: "Sub customer already in NS (skip load) vs must be created (load)",
     4: "Flagged customer: truly absent from NS vs in NS under a different id",
     5: "BA customer resolves to an NS customer (by C-number via customer CSV)",
-    6: "Every sub deal has its own Billing Account (<deal>_BA), loaded or in NS",
+    6: "Every sub has its own Billing Account (<deal>_<subid>_BA), loaded or in NS",
     7: "Sub subsidiary == its customer's NS subsidiary",
     8: "BA startDate present and <= earliest sub Start Date for the deal",
     9: "Active sub line Sales Item is mapped (not blank / not NOT MAPPED)",
@@ -157,10 +157,10 @@ CHECK_EXPLAIN = {
     "C-number / External ID 2 bridge failed — reconcile, don't duplicate'.",
     5: "Does each billing account point at a real NS customer? Bridges its "
     "MP_HubSpot id → customers CSV → C-number → NS.",
-    6: "Per sub DEAL: is there a `<deal>_BA` — queued in the billing CSV or "
-    "already in NS? Warns for deals with none (their sub loads unbilled). A "
-    "customer's OTHER billing accounts don't count — the sub links by "
-    "`<deal>_BA`.",
+    6: "Per SUB: is there a `<sub External ID>_BA` (the `<deal>_<subid>_BA` "
+    "convention) — queued in the billing CSV or already in NS? Warns for subs "
+    "with none (they load unbilled). A customer's OTHER billing accounts — even "
+    "a sibling sub's BA — don't count; the sub links by its own `<sub>_BA`.",
     7: "Does each sub's Subsidiary match its NS customer's subsidiary? A mismatch "
     "is a hard NS 400 at load time.",
     8: "Is each BA's startDate present and on/before its earliest subscription? "
@@ -176,8 +176,9 @@ CHECK_EXPLAIN = {
     "in NS? If not, the BA loader can't resolve them and skips the BA.",
     13: "Does each BA have its mandatory NS reference fields (subsidiary_id, "
     "currency_id) filled in the CSV?",
-    14: "Does each BA externalId follow the '<deal_id>_BA' convention? Drift here "
-    "quietly misaligns BAs and subs.",
+    14: "Does each BA externalId follow the '<deal>_<subid>_BA' convention "
+    "(ends in '_BA', prefix = its sub's External ID)? Drift here quietly "
+    "misaligns BAs and subs.",
 }
 
 
@@ -841,44 +842,48 @@ class Validator:
                 )
 
     def check_6_deal_has_ba(self):
-        """Check 6 (WARNING): every sub deal has its own Billing Account (`<deal>_BA`).
+        """Check 6 (WARNING): every sub has its own Billing Account (`<sub>_BA`).
 
-        A subscription links to its billing account by the `<deal>_BA` externalId,
-        so this is asked PER DEAL — not per customer. A deal is covered when its
-        `<deal>_BA` is either:
+        Convention (since 2026-07-09): one BA per SUB, keyed on the FULL sub
+        External ID — `<sub External ID>_BA` (i.e. `<deal>_<subid>_BA`, e.g.
+        498500387059_27401 → 498500387059_27401_BA). The subscription loader
+        looks its BA up by exactly this key, so this is asked PER SUB — not per
+        deal, not per customer. A sub is covered when its `<sub>_BA` is either:
           • already in NS (revisioned externalId in ``ns_ba_extids``), or
-          • queued in the billing CSV (a row whose deal id matches).
-        A deal with NEITHER → WARNING: its subscription would load with no
-        billing account (NS may silently auto-attach the customer's default BA).
-        Fix by keeping the deal's BA row in the billing CSV, or
-        `--create-missing-bas`. NB: a customer having some OTHER billing account
-        does NOT cover a deal — the sub needs THIS deal's `<deal>_BA`.
+          • queued in the billing CSV (a row whose externalId is `<sub>_BA`).
+        A sub with NEITHER → WARNING: it would load with no billing account
+        (NS may silently auto-attach the customer's default BA). Fix by keeping
+        the sub's BA row in the billing CSV, or `--create-missing-bas`. NB: a
+        customer having some OTHER billing account — even a sibling sub's BA on
+        the same deal — does NOT cover a sub; the loader needs THIS sub's
+        `<sub>_BA`.
         """
-        ba_csv_deals = {
-            _deal_id((r.get("externalId") or "").strip()) for r in (self.bas or [])
-        }
-        # name + customer-resolvability per deal, so we only flag deals whose
-        # customer is actually in NS (others are owned by checks 1/3/4).
-        for deal in sorted({_deal_id(e) for e in self.sub_groups}):
-            grp = next(
-                g for e, g in self.sub_groups.items() if _deal_id(e) == deal
-            )
+        # Sub External IDs covered by a BA row in the billing CSV (strip `_BA`).
+        ba_csv_subs = set()
+        for r in self.bas or []:
+            ba_ext = (r.get("externalId") or "").strip()
+            if ba_ext.endswith("_BA"):
+                ba_csv_subs.add(ba_ext[: -len("_BA")])
+        # Only flag subs whose customer is actually in NS (others are owned by
+        # checks 1/3/4).
+        for ext in sorted(self.sub_groups):
+            grp = self.sub_groups[ext]
             name = (grp[0].get("Customer") or "").strip()
             if not self.customer_ns_record(
                 self.sub_cnum(grp), self.resolve_customer_ext(name)
             ):
                 continue  # customer not in NS — checks 1 / 3 / 4 own this
-            if deal in ba_csv_deals:
-                continue  # a `<deal>_BA` row is queued in the billing CSV
-            if config.apply_revision(f"{deal}_BA") in self.ns_ba_extids:
-                continue  # `<deal>_BA` already exists in NS
+            if ext in ba_csv_subs:
+                continue  # a `<sub>_BA` row is queued in the billing CSV
+            if config.apply_revision(f"{ext}_BA") in self.ns_ba_extids:
+                continue  # `<sub>_BA` already exists in NS
             self.add(
                 6,
                 WARNING,
-                deal,
-                f"deal {deal} (customer {name!r}) has NO `{deal}_BA` — neither in "
-                f"the billing CSV nor in NS. Its subscription would load with no "
-                f"billing account. Add the BA row, or run --create-missing-bas.",
+                ext,
+                f"sub {ext} (customer {name!r}) has NO `{ext}_BA` — neither in "
+                f"the billing CSV nor in NS. It would load with no billing "
+                f"account. Add the BA row, or run --create-missing-bas.",
             )
 
     def check_7_subsidiary(self):
@@ -919,26 +924,36 @@ class Validator:
                 )
 
     def check_8_startdates(self):
-        """Check 8 (BLOCKER): BA startDate is present and not after its subs.
+        """Check 8 (BLOCKER): BA startDate is present and not after its sub.
 
-        For each deal, finds the earliest sub ``Start Date``, then for the deal's
-        BA: blocks if ``startDate`` is blank (NS would default it to today,
-        breaking any sub that starts earlier) or if it is later than the earliest
-        sub start. A BA must begin on/before the first subscription it bills.
-        Catches the Zebra blank-startDate case.
+        Each BA is matched to ITS sub by stripping the `_BA` suffix from its
+        externalId (`<sub External ID>_BA` → the sub's External ID — the
+        `<deal>_<subid>_BA` convention). Blocks if the BA's ``startDate`` is
+        blank (NS would default it to today, breaking a sub that starts
+        earlier) or if it is later than that sub's earliest ``Start Date``. A
+        BA must begin on/before the subscription it bills. Legacy `<deal>_BA`
+        rows (no matching sub External ID) fall back to the earliest start
+        across the whole deal. Catches the Zebra blank-startDate case and the
+        505257036006 10/06-vs-12/06 400.
         """
-        # earliest sub Start Date per deal
-        earliest = {}
+        # earliest sub Start Date per sub External ID, and per deal (fallback
+        # for legacy `<deal>_BA` rows).
+        earliest_by_sub: dict[str, str] = {}
+        earliest_by_deal: dict[str, str] = {}
         for ext, grp in self.sub_groups.items():
             deal = _deal_id(ext)
             for row in grp:
                 sd = (row.get("Start Date") or "").strip()
-                if sd:
-                    if deal not in earliest or sd < earliest[deal]:
-                        earliest[deal] = sd
+                if not sd:
+                    continue
+                if ext not in earliest_by_sub or sd < earliest_by_sub[ext]:
+                    earliest_by_sub[ext] = sd
+                if deal not in earliest_by_deal or sd < earliest_by_deal[deal]:
+                    earliest_by_deal[deal] = sd
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
-            deal = _deal_id(ba_ext)  # <deal>_BA → deal
+            # <sub External ID>_BA → sub External ID (legacy <deal>_BA → deal)
+            target = ba_ext[: -len("_BA")] if ba_ext.endswith("_BA") else ba_ext
             ba_start = (r.get("startDate") or "").strip()
             if not ba_start:
                 self.add(
@@ -949,14 +964,16 @@ class Validator:
                     "breaking subs that start earlier).",
                 )
                 continue
-            sub_start = earliest.get(deal)
+            sub_start = earliest_by_sub.get(target) or earliest_by_deal.get(
+                _deal_id(ba_ext)
+            )
             if sub_start and ba_start > sub_start:
                 self.add(
                     8,
                     BLOCKER,
                     ba_ext,
                     f"BA startDate {ba_start} > earliest sub Start Date "
-                    f"{sub_start} for deal {deal}.",
+                    f"{sub_start} for its sub {target}.",
                 )
 
     def check_9_sales_item(self):
@@ -1152,12 +1169,16 @@ class Validator:
                     self.add(13, BLOCKER, ba_ext, f"BA {field} is blank.")
 
     def check_14_extid_shape(self):
-        """Check 14 (WARNING): BA externalId follows the ``<deal_id>_BA`` shape.
+        """Check 14 (WARNING): BA externalId follows the ``<deal>_<subid>_BA`` shape.
 
-        Sanity-checks the naming convention by warning when a BA ``externalId``
-        doesn't end in ``_BA``. The subscription loader's shared-BA key derives
-        the deal id from this shape, so drift here would quietly misalign BAs and
-        subs. Warning only.
+        Two sanity tests per BA row:
+          • the externalId ends in ``_BA`` (bare convention drift), and
+          • its prefix (externalId minus ``_BA``) is the External ID of a sub in
+            the subs CSV — the subscription loader looks its BA up by exactly
+            ``<sub External ID>_BA``, so a BA whose prefix matches no sub would
+            load fine but NEVER be linked by any subscription (the Care Shield
+            failure mode: BA ``…_27401_BA`` vs loader asking for the old
+            ``<deal>_BA``). Warning only; skipped when the subs CSV is absent.
         """
         for r in self.bas or []:
             ba_ext = (r.get("externalId") or "").strip()
@@ -1167,6 +1188,17 @@ class Validator:
                     WARNING,
                     ba_ext,
                     "BA externalId does not end in '_BA' (convention drift).",
+                )
+                continue
+            sub_ext = ba_ext[: -len("_BA")]
+            if self.sub_groups and sub_ext not in self.sub_groups:
+                self.add(
+                    14,
+                    WARNING,
+                    ba_ext,
+                    f"BA prefix {sub_ext!r} matches no sub External ID in the subs "
+                    f"CSV — no subscription in this batch would link to this BA "
+                    f"(the loader looks up `<sub External ID>_BA`).",
                 )
 
     # ── orchestration ─────────────────────────────────────────────────────
@@ -1264,13 +1296,14 @@ class Validator:
             self._fetch_ns_by_name(names)
 
         if needs_ba_extids:
-            # For check 6: which `<deal>_BA` billing accounts already exist in NS.
-            # Per deal (the sub links to its BA by `<deal>_BA` externalId).
+            # For check 6: which `<sub>_BA` billing accounts already exist in NS.
+            # Per SUB (the sub links to its BA by `<sub External ID>_BA` — the
+            # `<deal>_<subid>_BA` convention, since 2026-07-09).
             ba_extids = {
-                config.apply_revision(f"{_deal_id(e)}_BA") for e in self.sub_groups
+                config.apply_revision(f"{e}_BA") for e in self.sub_groups
             }
             print(
-                f"  · querying NS for {len(ba_extids)} `<deal>_BA` externalIds…"
+                f"  · querying NS for {len(ba_extids)} `<sub>_BA` externalIds…"
             )
             self._fetch_ns_ba_extids(ba_extids)
 

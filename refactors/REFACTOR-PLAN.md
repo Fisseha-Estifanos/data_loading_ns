@@ -69,9 +69,13 @@ file to babysit.
     BA `startDate` must be ≤ the earliest sub start date for that deal.
   - **Sales item `NOT MAPPED`** (e.g. HubSpot line `456966763758` "NextGen Employee Assistance
     Programme" → NS item **5580** "Employee Assistance Program"). Loader skips `NOT MAPPED` lines.
-  - **Shared billing account per deal**: one BA per *deal*, keyed `<deal_id>_BA` where
-    `deal_id = sub External ID before the first underscore` (e.g. `494812626113_a_27397` and
-    `494812626113_27397` → both share `494812626113_BA`). Already implemented in `subscription.py`.
+  - **Billing account keying — CONVENTION CHANGED 2026-07-09**: originally one BA was shared
+    per *deal*, keyed `<deal_id>_BA` (deal = sub External ID before the first underscore; e.g.
+    `494812626113_a_27397` and `494812626113_27397` shared `494812626113_BA`). Since 2026-07-09
+    the BA export ships **one BA per sub**, keyed on the FULL sub External ID —
+    `<deal>_<subid>_BA` (e.g. `498500387059_27401` → `498500387059_27401_BA`) — and
+    `subscription.py`, `--create-missing-bas`, and validate checks 6/8/14 all use that key.
+    Pre-change records remain in NS under the old `<deal>_BA` shape.
   - **Address dependency**: BA load needs each customer to have a **default billing AND default
     shipping** address in NS, else that BA is skipped.
 

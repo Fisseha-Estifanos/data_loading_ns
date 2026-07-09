@@ -163,7 +163,11 @@ the open client-input/data blockers. Update it as tasks are completed.
 - **`Subscription Plan` and `Price Book` are NOT guaranteed to be on `rows[0]`** — they appear only on the plan-defining row. Loader uses `next()` scan across all group rows to find the first non-empty value.
 - Line fields (differ per row): Sales Item, Lines: Include, Price Plan External ID (new)
 - Customer resolution chain: `Customer` (name) → customer CSV `Company Name` → `External ID 2` → state tracker → NS internal ID
-- Billing account resolution: `{External ID}_BA` → state tracker → NS internal ID
+- Billing account resolution: `{External ID}_BA` → state tracker → NS internal ID.
+  **Convention (since 2026-07-09): one BA per SUB, keyed on the FULL sub External ID** —
+  `<deal>_<subid>_BA` (e.g. sub `498500387059_27401` → BA `498500387059_27401_BA`).
+  Previously one BA was shared per deal (`<deal>_BA`, deal = token before the first
+  underscore); records loaded before 2026-07-09 remain in NS under that old key shape.
 - **Price plan injection**: `Price Plan External ID` column looked up in state DB (`pricePlan` entity type); if found, `"pricePlan": {"id": "<ns_id>"}` is injected into the line payload. Blank PP = line uses plan default rate.
 
 ### One-Off Grouping Logic
