@@ -26,9 +26,10 @@ SUITEQL_URL = (
 )
 
 # --- Data File Paths ---
-SUBSCRIPTIONS_CSV = "data/subs-kleene-export-2026-06-29.csv"
-CUSTOMERS_CSV = "data/customers-kleene-export-2026-06-30.csv"
-BILLING_CSV = "data/billing-account-kleene-export-2026-06-29.csv"
+SUBSCRIPTIONS_CSV = "data/subs-kleene-export-2026-07-09.csv"
+BILLING_CSV = "data/billing-account-kleene-export-2026-07-09.csv"
+CUSTOMERS_CSV = "data/customers-kleene-export-2026-07-09.csv"
+
 PRICE_PLANS_CSV = "data/pricing-json-kleene-export-2026-06-30.csv"
 
 ONEOFF_CSV = "data/one-offs-kleene-export-2026-05-07.csv"
