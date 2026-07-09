@@ -394,6 +394,85 @@ sub-intervals --sub-id <id>                     dump price intervals (where pric
 
 ---
 
+## Scripts & tooling — the full inventory
+
+Every script in the repo, grouped by whether it is **part of the current load
+pipeline** or **stale / one-off** (superseded, served-its-purpose, or parked).
+Paths are repo-relative. "Run" commands assume your env is sourced (`source .env`
+or `.env.prod`) and you are in the repo root.
+
+> Legend: 🟢 **Active** — used (or usable) in a current load. 🗄️ **Stale/one-off**
+> — not part of any current flow; kept for history or future revival, several are
+> safe to delete. If you add or retire a script, update this table **and** the
+> standard load sequence above in the same change.
+
+### 🟢 Active — entry points
+
+| Script | What it does / when to run | Args |
+| --- | --- | --- |
+| `main.py` | The orchestrator. Loads all entities in dependency order, or one via `--entity`; also hosts the validator, reporting, and the patch / create-missing operations. | Full flag list in [CLI reference — `main.py`](#cli-reference--mainpy). |
+| `validate.py` | Read-only pre-load validator (the 14 checks above). Run **before every load**, standalone or as `python main.py --validate`. | `--entity <customer\|billingAccount\|pricePlan\|subscription\|oneOff>` scopes to one entity's checks (omit = all). |
+
+### 🟢 Active — pre-load data prep & gates (operate on the CSVs)
+
+| Script | What it does / when to run | Args |
+| --- | --- | --- |
+| `check_pricing_coverage.py` | Credential-free gate: is every price plan the subs reference present in the pricing CSV? Run the instant a regenerated pricing export lands — catches an **unscoped** export before you load. (Step 4-ish; also folded into validator check 11.) | `--quiet` (exit code only, no per-plan detail) |
+| `filter_to_subs.py` | Trims the 3 dependency CSVs (customers, price plans, billing) **in place** to only the rows the current subs reference; writes a timestamped `.bak`. Never touches the subs CSV. (README Step 4.) | `--dry-run` (preview, no write) |
+| `dedup_price_plans.py` | **Interim** transform: collapse the pricing CSV to one row per distinct pricing *shape* (item-free `MP_PP_<hash>`) and rewrite each sub line's `Price Plan External ID` to match; in place (`.bak`). (README Step 5.) | `--dry-run` |
+| `analyze_priceplan_dedup.py` | Read-only sizing report: how many *distinct* prices the batch actually needs vs how many plan externalIds the subs reference. Diagnostic for the dedup step. | `--full` (also analyse the whole pricing CSV, not just the batch) |
+
+### 🟢 Active — post-load fix & recovery
+
+| Script | What it does / when to run | Args |
+| --- | --- | --- |
+| `scripts/cleanup_unbilled_subscriptions.py` | Delete subscriptions that loaded **without a billing account** or **bound to the wrong customer**, and clear their state rows so a reload re-creates them. Read-only by default. (README Step 10.) | scope: `--from-csv` (default) \| `--all-revision` \| `--ext-id EXT` (repeatable); reasons: `--name-mismatch`, `--keep-missing-ba`; `--execute`; `--allow-prod` |
+| `repair_customer_addresses.py` | PATCH customers **loaded this run** (found via the state DB) that lack a default billing/shipping address — the BA loader needs both. ⚠️ State-DB-driven, so it only covers customers loaded this run; for a **pre-existing** (prod) customer use `prod/patch_customer_address.py` instead. | `--dry-run` |
+
+### 🟢 Active — prod helpers
+
+| Script | What it does / when to run | Args |
+| --- | --- | --- |
+| `prod/prod_check.py` | Read-only NS inspector (GET / SuiteQL only). Use freely before/after any load. | Subcommands documented in [Read-only inspector](#read-only-inspector--prodprod_checkpy). |
+| `prod/patch_customer_address.py` | Add/repair a default billing+shipping address on **one existing** customer, from the customer CSV or explicit values. Run dry first, then `--apply`. | target: `--customer-id` \| `--externalid`; source: `--from-csv --company-name "<NAME>"` or `--addr1/--addr2/--city/--state/--zip/--country/--addressee/--attention`; `--set-defaults`, `--add`, `--line-id`, `--apply` |
+
+### 🟢 Active — optional preflight & ad-hoc diagnostics
+
+| Script | What it does / when to run | Args |
+| --- | --- | --- |
+| `scripts/preflight_revision_load.py` | Read-only, no NS calls. After bumping `LOAD_REVISION`, reports per-entity counts, **state-DB collisions** (revision not bumped), and parent-lookup orphans. The collision check is the main value; the customer-orphan part is less relevant post-Option-B (customers are no longer seeded into the state DB). | *(none)* |
+| `suiteql.py` | Run any SuiteQL `SELECT` and print the rows as a table. The everyday NS lookup tool. | positional: the query string, e.g. `python suiteql.py "SELECT id, name FROM subscriptionplan"` |
+
+### 🟢 Active — core modules (imported by the loaders; not run directly)
+
+`config.py` (paths, creds, `LOAD_REVISION`, `apply_revision`) · `netsuite_client.py`
+(OAuth1 signing, REST, 3-tier ID retrieval) · `state_tracker.py` (SQLite idempotency
+and ID chaining) · `customer_resolver.py` (C-number / externalId → NS id, shared by
+the subs and BA loaders) · `pricing_shape.py` (the shape hash the dedup tooling keys
+on) · `loaders/base.py` and the five entity loaders under `loaders/`
+(`customer`, `billing_account`, `price_plan`, `subscription`, `one_off`) ·
+`__init__.py`, `loaders/__init__.py`.
+
+### 🗄️ Stale / one-off — not part of any current flow
+
+| Script | Why it's here / status |
+| --- | --- |
+| `base.py` (root) | **Duplicate** of `loaders/base.py` — nothing imports it. Safe to delete. |
+| `prod/seed_state.py` | **Retired by Option B.** Pre-existing customers are now resolved by C-number straight from NS, so seeding their internal IDs into the state DB is obsolete. |
+| `scripts/retrofit_subscription_pricing.py` | One-off backfill for the **first** subscription round (loaded before the price-plan layer existed). Built against `_rvn_01` and **not revision-aware** — audit before any reuse. |
+| `scripts/build_priced_subscriptions_report.py` | One-off client reconciliation report built from the retrofit CSV output. Retrofit-era. |
+| `scripts/build_retrofit_client_report.py` | One-off client report (summary/patched/orphaned/missing) from the retrofit CSV. Retrofit-era. |
+| `prod/probe_line_price.py` | Exploratory probe used to discover how a price attaches to a sub line. Finding (price lives on the `priceInterval`, not the line) is now baked into `loaders/subscription.py`. Kept for reference. |
+| `prod/probe_interval_price.py` | Companion probe that found the way to set the amount on the auto-created price interval — now the loader's approach. Kept for reference. |
+| `data/check_billing_customers.py` | Premise obsolete under Option B: it asserts every billing-CSV customer exists in the customer CSV, but pre-existing customers legitimately aren't in it now. Validator check 5 covers this correctly against NS. |
+| `scripts/filter_subs.py` | Ad-hoc generic subs-CSV subsetter by a key column (`--in/--out/--key/--values/--values-file`). Superseded by working from a batch-scoped export + `filter_to_subs.py`. Still works for manual carving. |
+| `get_metadata.py` | One-time custom-field discovery (script IDs + labels per record type). Mapping is complete — revive only to map **new** fields. Positional: record type. |
+| `probe_field_ids.py` | One-time SuiteQL resolver for linked-record custom-field internal IDs needed in the customer patch. Done. |
+| `debug_auth.py` | One-time OAuth-signing diagnostic (minimal GET, prints request/response). Auth works — revive only if signing breaks. |
+| `scripts/deactivate/deactivate_prior_revision.py` | **PARKED — future use, do NOT run as-is.** Would deactivate prior-revision records; needs per-entity review first (subscriptions/posted invoices can't simply be `isInactive`d). `--dry-run/--apply/--current-revision/--entity`. |
+
+---
+
 ## How it works (reference)
 
 ### ID resolution — 3-tier strategy
