@@ -10,8 +10,13 @@ Key design:
     plan-defining row (NULL on component/add-on rows). Those two fields are
     resolved by scanning all rows in the group for a non-empty value.
   - Each row produces a list of item names to include (split from comma-separated Sales Item cells)
-  - Customer is resolved by company name → customer CSV External ID 2 → state tracker
-  - Billing account is resolved by {deal_id}_BA → state tracker (if available)
+  - Customer is resolved to its NS internal id by C-number ONLY, straight
+    from NetSuite (see customer_resolver.CustomerResolver) — NOT via the state
+    tracker, so pre-existing customers resolve without seeding
+  - Billing account is resolved by {sub External ID}_BA (one BA per sub,
+    `<deal>_<subid>_BA`) → state tracker, then live NS. MANDATORY: a sub is
+    NEVER loaded without its BA — unresolvable BA = error + skip (NS would
+    otherwise silently attach the customer's default BA).
 
 Two-step subscription creation:
   Step 1 — POST subscription header (subscriptionPlan but NO subscriptionLine items).
@@ -32,6 +37,7 @@ from typing import Optional
 
 import config
 from loaders.base import BaseLoader
+from customer_resolver import CustomerResolver
 
 logger = logging.getLogger(__name__)
 
@@ -66,29 +72,87 @@ class SubscriptionLoader(BaseLoader):
 
     def __init__(self, client, tracker):
         super().__init__(client, tracker)
-        # Pre-load customer name → external ID mapping from customer CSV
-        self._customer_name_to_ext_id = self._build_customer_name_map()
+        # Resolve each subscription's customer to its NS internal id directly
+        # from NetSuite, by C-number ONLY (convention since 2026-07-09 — no
+        # externalId / name resolution; no state-tracker dependency).
+        self.resolver = CustomerResolver(client)
+        self._prefetch_customers()
         # ext_id → ordered list of (item_name, price_plan_external_id_or_None).
         # price_plan_external_id is populated from the CSV's "Price Plan External ID"
         # column. None means the row had no price plan (NS will fall back to the
         # plan's default rate). The price plan internal ID is resolved at PATCH
         # time via the state tracker.
         self._pending_lines: dict[str, list[tuple[str, Optional[str]]]] = {}
+        # Subs BLOCKED by the mandatory-BA gate this run: (raw_ext_id, ba_ext_id).
+        # prepare_records() re-emits these as one loud summary at the end.
+        self.ba_gate_blocked: list[tuple[str, str]] = []
 
-    def _build_customer_name_map(self) -> dict:
-        """Read customer CSV to build company name → External ID 2 lookup."""
-        mapping = {}
-        try:
-            with open(config.CUSTOMERS_CSV, "r", encoding="utf-8-sig") as f:
-                for row in csv.DictReader(f):
-                    name = row.get("Company Name", "").strip().upper()
-                    ext_id = row.get("External ID 2", "").strip()
-                    if name and ext_id:
-                        mapping[name] = ext_id
-        except FileNotFoundError:
-            logger.error(f"Customer CSV not found at {config.CUSTOMERS_CSV}")
-        logger.info(f"Built customer name→extId map: {len(mapping)} entries")
-        return mapping
+    def _prefetch_customers(self) -> None:
+        """One batched NS query for every customer the subs reference.
+
+        Gathers C-numbers only — the subs' NETSUITE_ACCOUNT_NUMBER* columns,
+        plus the customer CSV's C-number bridged by name — then prefetches
+        their NS internal ids so per-group resolution is local. The C-number
+        is the ONLY NS key (no externalId / name lookups).
+        """
+        cnums = set()
+        for row in self.read_csv():
+            name = row.get("Customer", "")
+            for col in ("NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"):
+                v = (row.get(col) or "").strip()
+                if v:
+                    cnums.add(v)
+            nc = self.resolver.name_cnum(name)
+            if nc:
+                cnums.add(nc)
+        self.resolver.prefetch(cnums)
+        logger.info(
+            "Customer resolver: %d C-numbers known in NS",
+            len(self.resolver.ns_by_cnum),
+        )
+
+    def _resolve_billing_account(self, ba_ext_id: str):
+        """NS internal id for a (revisioned) `<sub>_BA` externalId, or None.
+
+        State tracker first (BAs loaded this/earlier runs), then live NS by
+        externalId — so a BA that exists in NS but is missing from this
+        machine's state DB doesn't falsely trip the mandatory-BA gate. A live
+        hit is seeded back into the tracker (tier 'reconcile') so the next
+        lookup is local.
+        """
+        ns_id = self.tracker.get_netsuite_id("billingAccount", ba_ext_id)
+        if ns_id:
+            return ns_id
+        safe = ba_ext_id.replace("'", "''")
+        rows = self.client.suiteql_query(
+            f"SELECT id FROM billingaccount WHERE externalid = '{safe}'"
+        )
+        if rows and rows[0].get("id"):
+            ns_id = str(rows[0]["id"])
+            self.tracker.upsert_state(
+                entity_type="billingAccount",
+                external_id=ba_ext_id,
+                status="success",
+                netsuite_id=ns_id,
+                error_message=None,
+                payload_hash=None,
+                tier_used="reconcile",
+            )
+            logger.info(
+                f"  BA {ba_ext_id} found live in NS (id {ns_id}); seeded tracker."
+            )
+            return ns_id
+        return None
+
+    @staticmethod
+    def _first_value(rows: list[dict], *cols: str) -> str:
+        """First non-empty value of any of `cols` across a group's rows."""
+        for col in cols:
+            for r in rows:
+                v = (r.get(col) or "").strip()
+                if v:
+                    return v
+        return ""
 
     def get_external_id(self, row: dict) -> str:
         return row.get("External ID", "").strip()
@@ -118,6 +182,7 @@ class SubscriptionLoader(BaseLoader):
                 groups[raw_ext_id].append(row)
 
         records = []
+        self.ba_gate_blocked = []
         for raw_ext_id, group_rows in groups.items():
             payload = self._build_grouped_payload(raw_ext_id, group_rows)
             if payload is None:
@@ -128,6 +193,21 @@ class SubscriptionLoader(BaseLoader):
             ext_id = config.apply_revision(raw_ext_id)
             payload["externalId"] = ext_id
             records.append((ext_id, payload, group_rows[0]))
+
+        # Loud summary for the mandatory-BA gate: these subs were NOT loaded.
+        if self.ba_gate_blocked:
+            lines = "\n".join(
+                f"    ✗ {sub} → needs {ba}" for sub, ba in self.ba_gate_blocked
+            )
+            logger.error(
+                "\n" + "!" * 70 + "\n"
+                f"  {len(self.ba_gate_blocked)} SUBSCRIPTION(S) BLOCKED — "
+                f"missing billing account (subs NEVER load without a BA):\n"
+                f"{lines}\n"
+                f"  Fix: load the BA(s) first — billing CSV row or\n"
+                f"  `python main.py --entity billingAccount --create-missing-bas` — "
+                f"then re-run the subscription load.\n" + "!" * 70
+            )
 
         return records
 
@@ -176,44 +256,54 @@ class SubscriptionLoader(BaseLoader):
         header = rows[0]
 
         customer_name = header.get("Customer", "").strip()
-        customer_ext_id = self._customer_name_to_ext_id.get(customer_name.upper())
-        if not customer_ext_id:
-            logger.error(
-                f"Subscription {raw_ext_id}: cannot resolve customer "
-                f"'{customer_name}' to external ID"
+        # Resolve the customer's NS internal id by C-number ONLY (subs columns
+        # first, else the customer CSV's C-number bridged by name) — straight
+        # from NetSuite, no state tracker, no externalId/name lookups. A sub
+        # whose customer has no resolvable C-number is skipped with an error;
+        # never bound by any other key.
+        cnum = (
+            self._first_value(
+                rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"
             )
-            return None
-
-        customer_ext_id_rev = config.apply_revision(customer_ext_id)
-        customer_ns_id = self.tracker.get_netsuite_id("customer", customer_ext_id_rev)
+            or self.resolver.name_cnum(customer_name)
+        )
+        customer_ns_id = self.resolver.resolve(cnum)
         if not customer_ns_id:
             logger.error(
-                f"Subscription {raw_ext_id}: customer {customer_ext_id_rev} "
-                f"has no NS ID. Ensure customers are loaded first."
+                f"Subscription {raw_ext_id}: cannot resolve customer "
+                f"'{customer_name}' by C-number "
+                f"({cnum or 'no C-number in subs export or customer CSV'}). "
+                f"Customers attach by C-number only — fix the export."
             )
             return None
 
-        # Resolve billing account (may not exist for all subscriptions).
-        # One billing account is shared across all subscriptions that split off
-        # the same deal (e.g. AG HOTELS' 498737819895_27398 and any sibling
-        # split share BA 498737819895_BA). The BA ext_id is therefore keyed on
-        # the DEAL ID — the token before the first underscore in the sub's
-        # External ID — not the full sub External ID:
-        #   498737819895_27398   → deal 498737819895 → BA 498737819895_BA
-        #   494812626113_a_27397 → deal 494812626113 → BA 494812626113_BA
-        # Convention: revision is the last token, so the BA ext_id is
-        # `<deal_id>_BA<LOAD_REVISION>` (e.g. 498737819895_BA_rvn_prod_01).
-        deal_id = raw_ext_id.split("_", 1)[0]
-        billing_account_ext_id = config.apply_revision(f"{deal_id}_BA")
-        billing_account_ns_id = self.tracker.get_netsuite_id(
-            "billingAccount", billing_account_ext_id
-        )
+        # Resolve billing account — MANDATORY (rule since 2026-07-09): a
+        # subscription is NEVER loaded without its billing account. Loading
+        # without one is worse than "unbilled" — NS silently auto-attaches the
+        # customer's DEFAULT billing account, i.e. a wrong/arbitrary BA.
+        # Convention: each SUB has its own BA, keyed on the FULL sub External
+        # ID — `<deal>_<subid>_BA`:
+        #   498500387059_27401   → BA 498500387059_27401_BA
+        #   494812626113_a_27397 → BA 494812626113_a_27397_BA
+        # Revision is the last token, so the BA ext_id is
+        # `<sub External ID>_BA<LOAD_REVISION>` (e.g.
+        # 498500387059_27401_BA_rvn_prod_01). Resolution: state tracker first,
+        # then live NS by externalId; if NEITHER has it, the sub is BLOCKED
+        # (error + skip) — load the BA first (billing CSV row or
+        # --create-missing-bas), then re-run.
+        billing_account_ext_id = config.apply_revision(f"{raw_ext_id}_BA")
+        billing_account_ns_id = self._resolve_billing_account(billing_account_ext_id)
         if not billing_account_ns_id:
-            logger.warning(
-                f"Subscription {raw_ext_id}: no billing account found for "
-                f"{billing_account_ext_id}. Will create subscription without "
-                f"billing account reference."
+            msg = (
+                f"Subscription {raw_ext_id}: BLOCKED — billing account "
+                f"{billing_account_ext_id} is neither in the state DB nor in NS. "
+                f"A subscription is NEVER loaded without its BA (NS would "
+                f"auto-attach the customer's default BA). Load the BA first "
+                f"(billing CSV row or --create-missing-bas), then re-run."
             )
+            logger.error(msg)
+            self.ba_gate_blocked.append((raw_ext_id, billing_account_ext_id))
+            return None
 
         # ── Header fields ───────────────────────────────────────────────
         subsidiary_name = header.get("Subsidiary", "").strip()
@@ -254,9 +344,8 @@ class SubscriptionLoader(BaseLoader):
         if end_date:
             payload["endDate"] = end_date
 
-        # Billing account (if resolved)
-        if billing_account_ns_id:
-            payload["billingAccount"] = {"id": billing_account_ns_id}
+        # Billing account — always present (the BA gate above guarantees it).
+        payload["billingAccount"] = {"id": billing_account_ns_id}
 
         # Initial Term — resolve via TERM_MAP (plain string rejected by NS)
         initial_term_raw = header.get("Initial Term", "").strip()

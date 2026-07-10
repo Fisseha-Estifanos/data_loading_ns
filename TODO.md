@@ -9,40 +9,11 @@
 
 ---
 
-## CLI Quick Reference
+## How to run
 
-Run in this order:
-
-```text
-python main.py --field-map                        # 1. Inspect all CSV→API field mappings (no credentials)
-python main.py --dry-run --entity customer        # 2. Validate payloads before going live
-python main.py --dry-run --limit 1                #    Test a single record
-python main.py --entity customer                  # 3. Load customers (includes 9 custom fields automatically)
-python main.py --entity customer --patch-eer      #    Link Electronic Email Recipients (always a second step)
-python main.py --entity billingAccount            # 4. Load billing accounts (needs customers)
-python main.py --entity pricePlan                 # 5. Load price plans (needed before subscription)
-python main.py --entity subscription              # 6. Load subscriptions (needs customers + billing + price plans)
-python main.py --entity oneOff                    # 7. Load one-off invoices (needs customers)
-python main.py --report                           # 8. Check state summary + field mapping
-python main.py --report --failures                #    Include per-record error details
-
-# Retrofit (one-off — run after price plans are loaded):
-python scripts/retrofit_subscription_pricing.py --dry-run   # verify before applying
-python scripts/retrofit_subscription_pricing.py --apply     # attach pricePlan.id to already-loaded sub lines
-python scripts/retrofit_subscription_pricing.py --apply --limit 1  # smoke-test a single subscription
-```
-
-| Flag | Description |
-| --- | --- |
-| `--entity` | Load one entity type: customer, billingAccount, subscription, oneOff |
-| `--dry-run` | Build payloads and log them — no API calls made |
-| `--limit N` | Process only first N records |
-| `--skip-preflight` | Skip auth connectivity check at startup |
-| `--report` | Print load state summary. Also prints field mapping. No loading. |
-| `--failures` | Add per-record error details to `--report` output |
-| `--field-map` | Print CSV column → NetSuite API field mapping for all loaders. No credentials needed |
-| `--patch` | **Retroactive only.** PATCH already-loaded customers with custom fields. Not needed for new loads — fields are in `build_payload()` now. |
-| `--patch-eer` | Link `custentity_zellis_elec_email_recipients` via two-step POST+PATCH. Always run after `--entity customer`. |
+The load sequence, full CLI flag reference, and `prod/prod_check.py` commands
+live in **[README.md](README.md)** — the single source of truth for running the
+pipeline (sandbox and prod). This file tracks only outstanding work.
 
 ---
 
@@ -193,3 +164,24 @@ python scripts/retrofit_subscription_pricing.py --apply --limit 1  # smoke-test 
 - [ ] **Rate limit / throughput tuning**
   - `config.REQUEST_DELAY_SECONDS = 0.5` is conservative
   - Reduce after sandbox testing confirms NS rate limits are comfortable
+
+---
+
+## Open client-input / data blockers
+
+> Migrated from CLAUDE.md (originally dated 2026-04-27). **Re-verify currency**
+> against the latest Snowflake exports before acting — some may be resolved.
+> These resolve to `NEEDS_CLIENT_INPUT` in the `LINE_INDICATOR_RESOLVED`
+> classifier and are excluded from all entity loads until confirmed.
+
+- [ ] **Unmapped HubSpot items** (~91 items / ~1,711 line items) appear on real
+  customer deals but aren't in the `MP Active sales items - Identification`
+  catalogue. Awaiting client: in-scope or not, NS sales-item mapping, sub vs one-off.
+- [ ] **`MP Periodic Charge` semantics** (one-off Instruction 5 value) — no
+  matching field in `LINE_ITEM_DETAILS`. Affected items route to `NEEDS_CLIENT_INPUT`.
+- [ ] **Slippage `Delayed - *` variants** — client rule only names `Delayed - Client`,
+  but data has 4 other `Delayed - *` values (~2,600 lines). Confirm whether they
+  also trigger one-off classification.
+- [ ] **2 `Off Boarding Monthly Access to Read Only Licence` lines** — both
+  `MP_TOTAL_ONE_OFF_COST` and `MP_MONTHLY_FEE` populated/zero. Genuinely
+  ambiguous (sub vs one-off). Awaiting spot-check.

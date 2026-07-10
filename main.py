@@ -23,6 +23,7 @@ Usage:
 Environment variables for credentials (or edit config.py):
   NS_CONSUMER_KEY, NS_CONSUMER_SECRET, NS_ACCESS_TOKEN, NS_TOKEN_SECRET, NS_REALM
 """
+
 import argparse
 import json
 import logging
@@ -593,7 +594,9 @@ def print_report(
     """
     report_logger = logging.getLogger("report")
     rev_filter = None if all_revisions else config.LOAD_REVISION
-    scope_label = "ALL revisions" if all_revisions else f"revision {config.LOAD_REVISION!r}"
+    scope_label = (
+        "ALL revisions" if all_revisions else f"revision {config.LOAD_REVISION!r}"
+    )
 
     lines = []
     lines.append("\n" + "=" * 70)
@@ -671,6 +674,16 @@ def main():
         help="Print the CSV column → API field mapping report for all loaders",
     )
     parser.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "Run the read-only pre-load validator (validate.py) and exit. "
+            "Reports every data problem at once (name/key mismatches, subsidiary "
+            "conflicts, bad dates, unmapped items). Exits non-zero on blockers. "
+            "Respects --entity to scope checks. Run this before every load."
+        ),
+    )
+    parser.add_argument(
         "--skip-preflight", action="store_true", help="Skip auth preflight check"
     )
     parser.add_argument(
@@ -702,6 +715,17 @@ def main():
             "PATCH billing account startDates from the billing CSV. "
             "Compares CSV startDate against NS and PATCHes any that differ. "
             "Use with --entity billingAccount."
+        ),
+    )
+    parser.add_argument(
+        "--create-missing-bas",
+        action="store_true",
+        help=(
+            "Create billing accounts for subscription customers that have NONE "
+            "(no BA in NS and none in the billing CSV), derived from the "
+            "customer's NS address book + the subscription. Resolves the customer "
+            "by C-number (no seeding). Honours --dry-run. Use with "
+            "--entity billingAccount."
         ),
     )
     args = parser.parse_args()
@@ -757,13 +781,12 @@ def write_revision_status(
                 )
                 continue
             parts = [
-                f"{k}={result.get(k, 0)}" for k in ("success", "failed", "skipped")
+                f"{k}={result.get(k, 0)}"
+                for k in ("success", "failed", "skipped")
                 if k in result
             ]
             total = result.get("total", 0)
-            lines.append(
-                f"  {entity:18s} total={total}  " + "  ".join(parts)
-            )
+            lines.append(f"  {entity:18s} total={total}  " + "  ".join(parts))
 
     # Cumulative revision state across all 5 entities
     lines.append(f"Revision {rev} cumulative:")
@@ -813,6 +836,30 @@ def _run(args, logger, log_file: str):
 
     # Init components
     client = NetSuiteClient()
+
+    # ── Pre-load validator (read-only) ──────────────────────────────────
+    # Runs before any state/tracker work; NS is the source of truth here.
+    if args.validate:
+        from validate import run_validation
+
+        entities = {args.entity} if args.entity else None
+        v_code = run_validation(entities, client=client)
+
+        # Pricing coverage gate — only when subscriptions are in scope. The
+        # validator's check 11 reports uncovered price plans as WARNINGS (the
+        # load still proceeds); this gate FAILS the --validate run on the same
+        # condition, because an uncovered plan means the sub line silently loads
+        # against the £0 price-book default. Reads only the local CSVs (no NS
+        # calls). Its non-zero exit is OR'd into the validator's.
+        c_code = 0
+        if entities is None or "subscription" in entities:
+            from check_pricing_coverage import run_coverage_gate
+
+            print()  # separate it from the validation report above
+            c_code = run_coverage_gate()
+
+        sys.exit(v_code or c_code)
+
     tracker = StateTracker()
 
     try:
@@ -883,6 +930,29 @@ def _run(args, logger, log_file: str):
                 "=" * 70,
             ]
             for key in ("total", "patched", "skipped", "failed"):
+                if key in result:
+                    lines.append(f"    {key:20s}: {result[key]}")
+            lines.append("=" * 70)
+            logger.info("\n".join(lines))
+            return
+
+        # ── Create missing billing accounts (from the address book) ──────
+        if args.create_missing_bas:
+            if args.entity and args.entity != "billingAccount":
+                logger.error(
+                    "--create-missing-bas only supports --entity billingAccount"
+                )
+                sys.exit(1)
+            loader = BillingAccountLoader(client, tracker)
+            result = loader.create_missing(dry_run=args.dry_run)
+            lines = [
+                "\n" + "=" * 70,
+                "  CREATE MISSING BILLING ACCOUNTS"
+                + ("  (DRY RUN)" if result.get("dry_run") else "")
+                + " — SUMMARY",
+                "=" * 70,
+            ]
+            for key in ("total", "created", "failed", "skipped"):
                 if key in result:
                     lines.append(f"    {key:20s}: {result[key]}")
             lines.append("=" * 70)

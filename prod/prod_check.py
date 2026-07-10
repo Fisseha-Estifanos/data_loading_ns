@@ -435,8 +435,11 @@ def sub_readiness(client, deal_id: str, c_number: str = None) -> None:
         )
     else:
         find_customer(client, name=customer_name)
-    print("  → If the customer already exists, note its internal id: you'll seed")
-    print("    the prod state DB with it so the sub links to the right record.")
+    print("  → Customers attach by C-number (entityid) ONLY — no externalId/name")
+    print("    resolution (convention 2026-07-09). If the customer exists, ensure")
+    print("    the subs export carries its C-number (NETSUITE_ACCOUNT_NUMBER*);")
+    print("    no state-DB seeding needed. The name/externalId checks above are")
+    print("    informational only.")
 
     # 2) Billing account
     print("\n── 2. BILLING ACCOUNT " + "─" * 42)
