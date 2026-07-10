@@ -72,7 +72,7 @@ CHECK_ENTITY = {
 # Severity each check emits. Used so a "not evaluated" finding (missing input)
 # carries the check's native severity — you can't confirm a BLOCKER check is
 # safe if its input is absent, so that absence must itself block.
-BLOCKER_CHECKS = {1, 2, 5, 5.1, 7, 8, 9, 12, 13}
+BLOCKER_CHECKS = {1, 2, 5, 5.1, 6, 7, 8, 9, 12, 13}
 
 # CSV inputs each check requires to produce a meaningful result. If any are
 # missing (None from _read_csv — a bad path in config), run() skips the check
@@ -169,9 +169,11 @@ CHECK_EXPLAIN = {
     "customer it will bind to? A mismatch is a hard NS 400 at load ('Invalid "
     "Field Value ... subsidiary' — the B&M BA failure of 2026-07-09).",
     6: "Per SUB: is there a `<sub External ID>_BA` (the `<deal>_<subid>_BA` "
-    "convention) — queued in the billing CSV or already in NS? Warns for subs "
-    "with none (they load unbilled). A customer's OTHER billing accounts — even "
-    "a sibling sub's BA — don't count; the sub links by its own `<sub>_BA`.",
+    "convention) — queued in the billing CSV or already in NS? BLOCKS for subs "
+    "with none: a subscription is NEVER loaded without its BA (the loader "
+    "refuses; NS would otherwise attach the customer's default BA). A "
+    "customer's OTHER billing accounts — even a sibling sub's BA — don't "
+    "count; the sub links by its own `<sub>_BA`.",
     7: "Does each sub's Subsidiary match its NS customer's subsidiary? A mismatch "
     "is a hard NS 400 at load time.",
     8: "Is each BA's startDate present and on/before its earliest subscription? "
@@ -844,21 +846,24 @@ class Validator:
                 )
 
     def check_6_deal_has_ba(self):
-        """Check 6 (WARNING): every sub has its own Billing Account (`<sub>_BA`).
+        """Check 6 (BLOCKER): every sub has its own Billing Account (`<sub>_BA`).
 
-        Convention (since 2026-07-09): one BA per SUB, keyed on the FULL sub
-        External ID — `<sub External ID>_BA` (i.e. `<deal>_<subid>_BA`, e.g.
+        RULE (since 2026-07-09): a subscription is NEVER loaded without its
+        billing account — the subscription loader hard-refuses (error + skip),
+        because NS would otherwise silently attach the customer's DEFAULT BA.
+        This check BLOCKS, mirroring the loader's mandatory-BA gate exactly.
+
+        Convention: one BA per SUB, keyed on the FULL sub External ID —
+        `<sub External ID>_BA` (i.e. `<deal>_<subid>_BA`, e.g.
         498500387059_27401 → 498500387059_27401_BA). The subscription loader
         looks its BA up by exactly this key, so this is asked PER SUB — not per
         deal, not per customer. A sub is covered when its `<sub>_BA` is either:
           • already in NS (revisioned externalId in ``ns_ba_extids``), or
           • queued in the billing CSV (a row whose externalId is `<sub>_BA`).
-        A sub with NEITHER → WARNING: it would load with no billing account
-        (NS may silently auto-attach the customer's default BA). Fix by keeping
-        the sub's BA row in the billing CSV, or `--create-missing-bas`. NB: a
-        customer having some OTHER billing account — even a sibling sub's BA on
-        the same deal — does NOT cover a sub; the loader needs THIS sub's
-        `<sub>_BA`.
+        A sub with NEITHER → BLOCKER. Fix by keeping the sub's BA row in the
+        billing CSV, or `--create-missing-bas`. NB: a customer having some OTHER
+        billing account — even a sibling sub's BA on the same deal — does NOT
+        cover a sub; the loader needs THIS sub's `<sub>_BA`.
         """
         # Sub External IDs covered by a BA row in the billing CSV (strip `_BA`).
         ba_csv_subs = set()
@@ -879,11 +884,12 @@ class Validator:
                 continue  # `<sub>_BA` already exists in NS
             self.add(
                 6,
-                WARNING,
+                BLOCKER,
                 ext,
                 f"sub {ext} (customer {name!r}) has NO `{ext}_BA` — neither in "
-                f"the billing CSV nor in NS. It would load with no billing "
-                f"account. Add the BA row, or run --create-missing-bas.",
+                f"the billing CSV nor in NS. Subs are NEVER loaded without a BA; "
+                f"the loader will refuse this sub. Add the BA row, or run "
+                f"--create-missing-bas.",
             )
 
     def check_7_subsidiary(self):

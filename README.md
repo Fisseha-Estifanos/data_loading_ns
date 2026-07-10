@@ -174,7 +174,7 @@ in the *Group* column.
 | 4 | Truly absent vs in NS under a different id | Warning | NS | Customers | For customers check 3 flagged: genuinely missing (create) vs already in NS under a mismatched id (reconcile — don't create a duplicate). |
 | 5 | BA customer resolves to an NS customer | Blocker | NS + CSV | Billing accounts | Each BA's customer resolves by **C-number ONLY** — sourced from its owning sub's `NETSUITE_ACCOUNT_NUMBER*` (via the `<sub>_BA` key), else the customer CSV's C-number bridged from `customer_externalId`. |
 | 5.1 | BA subsidiary matches its customer | Blocker | NS + CSV | Billing accounts | Each BA's `subsidiary_id` equals the NS subsidiary of the customer it binds to — a mismatch is a hard NS 400 (`Invalid Field Value ... subsidiary`). |
-| 6 | Every sub has its own `<deal>_<subid>_BA` | Warning | NS + CSV | Billing accounts | Each **sub** has its own Billing Account keyed `<sub External ID>_BA` (the `<deal>_<subid>_BA` convention) — already in NS, or one queued in the billing CSV. Warns when **neither** (that sub would be unbilled). A sub links to its own `<sub>_BA`, so the customer's *other* BAs — even a sibling sub's — don't count. |
+| 6 | Every sub has its own `<deal>_<subid>_BA` | Blocker | NS + CSV | Billing accounts | Each **sub** has its own Billing Account keyed `<sub External ID>_BA` (the `<deal>_<subid>_BA` convention) — already in NS, or one queued in the billing CSV. **Blocks** when **neither**: a subscription is NEVER loaded without its BA — the loader refuses it (NS would otherwise silently attach the customer's *default* BA). A sub links to its own `<sub>_BA`, so the customer's *other* BAs — even a sibling sub's — don't count. |
 | 7 | Sub subsidiary == NS customer's subsidiary | Blocker | NS + CSV | Subscriptions | The sub's Subsidiary equals its NS customer's subsidiary. A mismatch is a hard NS 400 at load. |
 | 8 | BA startDate <= earliest sub Start Date | Blocker | CSV | Billing accounts | Each BA's startDate is present and on/before its earliest subscription start (a blank/late start breaks the subs it bills). |
 | 9 | Active sub line Sales Item is mapped | Blocker | CSV | Subscriptions | Every included sub line has a real Sales Item (not blank / not `NOT MAPPED`) — unmapped lines load silently short. |
@@ -197,7 +197,7 @@ the subs carry its C-number**, or its subs/BAs cannot attach.
 | --- | --- | --- |
 | **Check 3** — already in NS vs must create | Which customers exist in NS (skip) vs which don't | Load only the customers flagged **NOT in NS** |
 | **Check 4** — truly absent vs different id | Whether a flagged customer is genuinely missing or has a mismatched id | Create the truly-absent ones; reconcile the id for the rest (don't duplicate) |
-| **Check 6** — every sub has its own `<sub>_BA` | Which subs already have their `<sub External ID>_BA` (skip) vs which have none | Load the `<sub>_BA` rows in the billing CSV; fill genuine per-sub gaps with `--create-missing-bas` in Step 8 |
+| **Check 6** — every sub has its own `<sub>_BA` | Which subs already have their `<sub External ID>_BA` vs which have none (those subs are **blocked** — subs never load without a BA) | Load the `<sub>_BA` rows in the billing CSV; fill genuine per-sub gaps with `--create-missing-bas` in Step 8 — **before** the subscription load |
 
 ### Step 8 — Load in dependency order
 
@@ -289,7 +289,7 @@ python main.py --entity subscription
 1. Customer              (no dependencies)
 2. Billing Account       ← references Customer NS internal ID
 3. Price Plan            (no NS parent deps — refs sales items by name only)
-4. Subscription          ← references Customer + Billing Account + Price Plan (per line)
+4. Subscription          ← references Customer + Billing Account (MANDATORY) + Price Plan (per line)
 5. One-Off Invoice       ← references Customer NS internal ID
 ```
 
@@ -314,6 +314,13 @@ billing acct → customer   by C-number: its OWNING SUB's C-number
 subscription → billing    by externalId KEY (not a customer lookup):
                           `<sub External ID>_BA` (= `<deal>_<subid>_BA`)
 ```
+
+**A subscription is NEVER loaded without its billing account.** The loader
+resolves `<sub External ID>_BA` from the state DB, then live NS; if neither has
+it, the sub is refused (error + skip, with a summary of every blocked sub) —
+because loading without a BA doesn't leave the sub unbilled, it makes NS
+silently attach the customer's *default* BA (an arbitrary/wrong one). Load the
+BA first, then the sub. Validate check 6 blocks on exactly the same condition.
 
 Because the BA takes its C-number from its own sub, a sub and its BA can never
 bind to different customers. `validate.py` mirrors this exactly (checks 1–5.1),

@@ -14,7 +14,9 @@ Key design:
     from NetSuite (see customer_resolver.CustomerResolver) — NOT via the state
     tracker, so pre-existing customers resolve without seeding
   - Billing account is resolved by {sub External ID}_BA (one BA per sub,
-    `<deal>_<subid>_BA`) → state tracker (if available)
+    `<deal>_<subid>_BA`) → state tracker, then live NS. MANDATORY: a sub is
+    NEVER loaded without its BA — unresolvable BA = error + skip (NS would
+    otherwise silently attach the customer's default BA).
 
 Two-step subscription creation:
   Step 1 — POST subscription header (subscriptionPlan but NO subscriptionLine items).
@@ -81,6 +83,9 @@ class SubscriptionLoader(BaseLoader):
         # plan's default rate). The price plan internal ID is resolved at PATCH
         # time via the state tracker.
         self._pending_lines: dict[str, list[tuple[str, Optional[str]]]] = {}
+        # Subs BLOCKED by the mandatory-BA gate this run: (raw_ext_id, ba_ext_id).
+        # prepare_records() re-emits these as one loud summary at the end.
+        self.ba_gate_blocked: list[tuple[str, str]] = []
 
     def _prefetch_customers(self) -> None:
         """One batched NS query for every customer the subs reference.
@@ -105,6 +110,39 @@ class SubscriptionLoader(BaseLoader):
             "Customer resolver: %d C-numbers known in NS",
             len(self.resolver.ns_by_cnum),
         )
+
+    def _resolve_billing_account(self, ba_ext_id: str):
+        """NS internal id for a (revisioned) `<sub>_BA` externalId, or None.
+
+        State tracker first (BAs loaded this/earlier runs), then live NS by
+        externalId — so a BA that exists in NS but is missing from this
+        machine's state DB doesn't falsely trip the mandatory-BA gate. A live
+        hit is seeded back into the tracker (tier 'reconcile') so the next
+        lookup is local.
+        """
+        ns_id = self.tracker.get_netsuite_id("billingAccount", ba_ext_id)
+        if ns_id:
+            return ns_id
+        safe = ba_ext_id.replace("'", "''")
+        rows = self.client.suiteql_query(
+            f"SELECT id FROM billingaccount WHERE externalid = '{safe}'"
+        )
+        if rows and rows[0].get("id"):
+            ns_id = str(rows[0]["id"])
+            self.tracker.upsert_state(
+                entity_type="billingAccount",
+                external_id=ba_ext_id,
+                status="success",
+                netsuite_id=ns_id,
+                error_message=None,
+                payload_hash=None,
+                tier_used="reconcile",
+            )
+            logger.info(
+                f"  BA {ba_ext_id} found live in NS (id {ns_id}); seeded tracker."
+            )
+            return ns_id
+        return None
 
     @staticmethod
     def _first_value(rows: list[dict], *cols: str) -> str:
@@ -144,6 +182,7 @@ class SubscriptionLoader(BaseLoader):
                 groups[raw_ext_id].append(row)
 
         records = []
+        self.ba_gate_blocked = []
         for raw_ext_id, group_rows in groups.items():
             payload = self._build_grouped_payload(raw_ext_id, group_rows)
             if payload is None:
@@ -154,6 +193,21 @@ class SubscriptionLoader(BaseLoader):
             ext_id = config.apply_revision(raw_ext_id)
             payload["externalId"] = ext_id
             records.append((ext_id, payload, group_rows[0]))
+
+        # Loud summary for the mandatory-BA gate: these subs were NOT loaded.
+        if self.ba_gate_blocked:
+            lines = "\n".join(
+                f"    ✗ {sub} → needs {ba}" for sub, ba in self.ba_gate_blocked
+            )
+            logger.error(
+                "\n" + "!" * 70 + "\n"
+                f"  {len(self.ba_gate_blocked)} SUBSCRIPTION(S) BLOCKED — "
+                f"missing billing account (subs NEVER load without a BA):\n"
+                f"{lines}\n"
+                f"  Fix: load the BA(s) first — billing CSV row or\n"
+                f"  `python main.py --entity billingAccount --create-missing-bas` — "
+                f"then re-run the subscription load.\n" + "!" * 70
+            )
 
         return records
 
@@ -223,26 +277,33 @@ class SubscriptionLoader(BaseLoader):
             )
             return None
 
-        # Resolve billing account (may not exist for all subscriptions).
-        # Convention (since 2026-07-09): each SUB has its own billing account,
-        # keyed on the FULL sub External ID — `<deal>_<subid>_BA`:
+        # Resolve billing account — MANDATORY (rule since 2026-07-09): a
+        # subscription is NEVER loaded without its billing account. Loading
+        # without one is worse than "unbilled" — NS silently auto-attaches the
+        # customer's DEFAULT billing account, i.e. a wrong/arbitrary BA.
+        # Convention: each SUB has its own BA, keyed on the FULL sub External
+        # ID — `<deal>_<subid>_BA`:
         #   498500387059_27401   → BA 498500387059_27401_BA
         #   494812626113_a_27397 → BA 494812626113_a_27397_BA
-        # (Previously one BA was shared per deal, keyed `<deal>_BA`; the BA
-        # export now ships one row per sub, so the key follows the sub.)
         # Revision is the last token, so the BA ext_id is
         # `<sub External ID>_BA<LOAD_REVISION>` (e.g.
-        # 498500387059_27401_BA_rvn_prod_01).
+        # 498500387059_27401_BA_rvn_prod_01). Resolution: state tracker first,
+        # then live NS by externalId; if NEITHER has it, the sub is BLOCKED
+        # (error + skip) — load the BA first (billing CSV row or
+        # --create-missing-bas), then re-run.
         billing_account_ext_id = config.apply_revision(f"{raw_ext_id}_BA")
-        billing_account_ns_id = self.tracker.get_netsuite_id(
-            "billingAccount", billing_account_ext_id
-        )
+        billing_account_ns_id = self._resolve_billing_account(billing_account_ext_id)
         if not billing_account_ns_id:
-            logger.warning(
-                f"Subscription {raw_ext_id}: no billing account found for "
-                f"{billing_account_ext_id}. Will create subscription without "
-                f"billing account reference."
+            msg = (
+                f"Subscription {raw_ext_id}: BLOCKED — billing account "
+                f"{billing_account_ext_id} is neither in the state DB nor in NS. "
+                f"A subscription is NEVER loaded without its BA (NS would "
+                f"auto-attach the customer's default BA). Load the BA first "
+                f"(billing CSV row or --create-missing-bas), then re-run."
             )
+            logger.error(msg)
+            self.ba_gate_blocked.append((raw_ext_id, billing_account_ext_id))
+            return None
 
         # ── Header fields ───────────────────────────────────────────────
         subsidiary_name = header.get("Subsidiary", "").strip()
@@ -283,9 +344,8 @@ class SubscriptionLoader(BaseLoader):
         if end_date:
             payload["endDate"] = end_date
 
-        # Billing account (if resolved)
-        if billing_account_ns_id:
-            payload["billingAccount"] = {"id": billing_account_ns_id}
+        # Billing account — always present (the BA gate above guarantees it).
+        payload["billingAccount"] = {"id": billing_account_ns_id}
 
         # Initial Term — resolve via TERM_MAP (plain string rejected by NS)
         initial_term_raw = header.get("Initial Term", "").strip()

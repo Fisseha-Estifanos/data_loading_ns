@@ -163,11 +163,16 @@ the open client-input/data blockers. Update it as tasks are completed.
 - **`Subscription Plan` and `Price Book` are NOT guaranteed to be on `rows[0]`** — they appear only on the plan-defining row. Loader uses `next()` scan across all group rows to find the first non-empty value.
 - Line fields (differ per row): Sales Item, Lines: Include, Price Plan External ID (new)
 - Customer resolution (since 2026-07-09): by **C-number (NS `entityid`) ONLY** — subs `NETSUITE_ACCOUNT_NUMBER` → `NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL` → customer CSV `C-number` (bridged by `Customer` name, alias-resolved). No externalId or company-name resolution against NS; no state tracker. A customer created by this loader resolves only after the warehouse re-exports with its NS-assigned C-number.
-- Billing account resolution: `{External ID}_BA` → state tracker → NS internal ID.
+- Billing account resolution: `{External ID}_BA` → state tracker → live NS.
   **Convention (since 2026-07-09): one BA per SUB, keyed on the FULL sub External ID** —
   `<deal>_<subid>_BA` (e.g. sub `498500387059_27401` → BA `498500387059_27401_BA`).
   Previously one BA was shared per deal (`<deal>_BA`, deal = token before the first
   underscore); records loaded before 2026-07-09 remain in NS under that old key shape.
+  **BA is MANDATORY (rule since 2026-07-09): a subscription is never POSTed without
+  `billingAccount`.** If `<sub>_BA` resolves in neither the state DB nor live NS, the
+  loader errors + skips the sub (and prints a blocked-subs summary) — loading without
+  a BA makes NS silently attach the customer's DEFAULT billing account, i.e. a wrong
+  one. Validate check 6 (BLOCKER) gates the same condition pre-load.
 - **Price plan injection**: `Price Plan External ID` column looked up in state DB (`pricePlan` entity type); if found, `"pricePlan": {"id": "<ns_id>"}` is injected into the line payload. Blank PP = line uses plan default rate.
 
 ### One-Off Grouping Logic
