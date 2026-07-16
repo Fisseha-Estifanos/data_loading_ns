@@ -159,7 +159,7 @@ A coverage FAIL usually means the pricing export was generated **unscoped** (the
 full price book, capped ~20k rows) instead of scoped to this batch — re-run the
 pricing DDL scoped to the batch (`filter_to_subs.py` can't fix it).
 
-#### The 14 checks at a glance
+#### The validation checks at a glance
 
 **Blockers** exit non-zero and must be resolved before loading; **warnings** are
 informational and the load proceeds. *Reads* shows whether the check queries
@@ -178,6 +178,7 @@ in the *Group* column.
 | 7 | Sub subsidiary == NS customer's subsidiary | Blocker | NS + CSV | Subscriptions | The sub's Subsidiary equals its NS customer's subsidiary. A mismatch is a hard NS 400 at load. |
 | 8 | BA startDate <= earliest sub Start Date | Blocker | CSV | Billing accounts | Each BA's startDate is present and on/before its earliest subscription start (a blank/late start breaks the subs it bills). |
 | 9 | Active sub line Sales Item is mapped | Blocker | CSV | Subscriptions | Every included sub line has a real Sales Item (not blank / not `NOT MAPPED`) — unmapped lines load silently short. |
+| 9.1 | Every included line carries a Price Plan External ID | Blocker | CSV | Price plans | The plan record holds **all** the pricing (currency, min/max, price tiers); a line with no plan bills at the **£0** book-default placeholder. **Blocks**: the loader refuses to load a sub with unpriced lines (mirror of the mandatory-BA gate, check 6). Applies the loader's same-item backfill first, so a blank cell covered by a sibling row doesn't flag. |
 | 10 | Sub line Price Plan exists in NS | Warning | NS | Price plans | Each line's price plan already exists in NS, else the line falls back to the £0 book default. |
 | 11 | Sub line Price Plan exists in the pricing CSV | Warning | CSV | Price plans | Each line's price plan exists in the pricing CSV (i.e. *can* be created). Missing from both NS and CSV = no source row to push. |
 | 12 | BA customer has default billing AND shipping address | Blocker | NS | Billing accounts | Each BA's customer has both a default billing and shipping address in NS — the BA loader needs both or it skips the BA. |
@@ -322,6 +323,16 @@ because loading without a BA doesn't leave the sub unbilled, it makes NS
 silently attach the customer's *default* BA (an arbitrary/wrong one). Load the
 BA first, then the sub. Validate check 6 blocks on exactly the same condition.
 
+**A subscription is NEVER loaded with unpriced lines** (rule since 2026-07-15).
+All pricing — currency, min/max, price tiers — lives in the **price plan** record;
+a sub line only references it via `Price Plan External ID`. A line with no plan
+bills at the plan's price-book default, and Moorepay's standard books are **£0
+placeholders** — so an unpriced line silently creates a £0 line (the April 2026
+loads did exactly this and needed the retrofit backfill). The loader refuses any
+sub with an included line whose plan id is blank (after same-item backfill), with
+a summary of every blocked sub. Validate check 9.1 and `check_pricing_coverage.py`
+block/fail on the same condition pre-load.
+
 Because the BA takes its C-number from its own sub, a sub and its BA can never
 bind to different customers. `validate.py` mirrors this exactly (checks 1–5.1),
 and check 5.1 blocks a BA whose CSV `subsidiary_id` differs from its resolved
@@ -457,13 +468,13 @@ or `.env.prod`) and you are in the repo root.
 | Script | What it does / when to run | Args |
 | --- | --- | --- |
 | `main.py` | The orchestrator. Loads all entities in dependency order, or one via `--entity`; also hosts the validator, reporting, and the patch / create-missing operations. | Full flag list in [CLI reference — `main.py`](#cli-reference--mainpy). |
-| `validate.py` | Read-only pre-load validator (the 14 checks above). Run **before every load**, standalone or as `python main.py --validate`. | `--entity <customer\|billingAccount\|pricePlan\|subscription\|oneOff>` scopes to one entity's checks (omit = all). |
+| `validate.py` | Read-only pre-load validator (the checks above). Run **before every load**, standalone or as `python main.py --validate`. | `--entity <customer\|billingAccount\|pricePlan\|subscription\|oneOff>` scopes to one entity's checks (omit = all). |
 
 ### 🟢 Active — pre-load data prep & gates (operate on the CSVs)
 
 | Script | What it does / when to run | Args |
 | --- | --- | --- |
-| `check_pricing_coverage.py` | Credential-free gate: is every price plan the subs reference present in the pricing CSV? Run the instant a regenerated pricing export lands — catches an **unscoped** export before you load. (Step 4-ish; also folded into validator check 11.) | `--quiet` (exit code only, no per-plan detail) |
+| `check_pricing_coverage.py` | Credential-free gate: is every price plan the subs reference present in the pricing CSV, and does every included line carry a plan at all? Run the instant a regenerated export lands — catches an **unscoped** pricing export and **unpriced lines** (would bill £0) before you load. A `0/0` pass is reported as *vacuous*, not clean. (Also folded into validator checks 9.1 + 11.) | `--quiet` (exit code only, no per-plan detail) |
 | `filter_to_subs.py` | Trims the 3 dependency CSVs (customers, price plans, billing) **in place** to only the rows the current subs reference; writes a timestamped `.bak`. Never touches the subs CSV. (README Step 4.) | `--dry-run` (preview, no write) |
 | `dedup_price_plans.py` | **Interim** transform: collapse the pricing CSV to one row per distinct pricing *shape* (item-free `MP_PP_<hash>`) and rewrite each sub line's `Price Plan External ID` to match; in place (`.bak`). (README Step 5.) | `--dry-run` |
 | `analyze_priceplan_dedup.py` | Read-only sizing report: how many *distinct* prices the batch actually needs vs how many plan externalIds the subs reference. Diagnostic for the dedup step. | `--full` (also analyse the whole pricing CSV, not just the batch) |

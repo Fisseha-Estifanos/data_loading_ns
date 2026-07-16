@@ -86,6 +86,8 @@ class SubscriptionLoader(BaseLoader):
         # Subs BLOCKED by the mandatory-BA gate this run: (raw_ext_id, ba_ext_id).
         # prepare_records() re-emits these as one loud summary at the end.
         self.ba_gate_blocked: list[tuple[str, str]] = []
+        # Subs BLOCKED by the mandatory-pricing gate: (raw_ext_id, [unpriced items]).
+        self.pricing_gate_blocked: list[tuple[str, list]] = []
 
     def _prefetch_customers(self) -> None:
         """One batched NS query for every customer the subs reference.
@@ -98,7 +100,10 @@ class SubscriptionLoader(BaseLoader):
         cnums = set()
         for row in self.read_csv():
             name = row.get("Customer", "")
-            for col in ("NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"):
+            for col in (
+                "NETSUITE_ACCOUNT_NUMBER",
+                "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL",
+            ):
                 v = (row.get(col) or "").strip()
                 if v:
                     cnums.add(v)
@@ -183,6 +188,7 @@ class SubscriptionLoader(BaseLoader):
 
         records = []
         self.ba_gate_blocked = []
+        self.pricing_gate_blocked = []
         for raw_ext_id, group_rows in groups.items():
             payload = self._build_grouped_payload(raw_ext_id, group_rows)
             if payload is None:
@@ -207,6 +213,22 @@ class SubscriptionLoader(BaseLoader):
                 f"  Fix: load the BA(s) first — billing CSV row or\n"
                 f"  `python main.py --entity billingAccount --create-missing-bas` — "
                 f"then re-run the subscription load.\n" + "!" * 70
+            )
+
+        # Loud summary for the mandatory-pricing gate: these subs were NOT loaded.
+        if self.pricing_gate_blocked:
+            lines = "\n".join(
+                f"    ✗ {sub} → unpriced line(s): {items}"
+                for sub, items in self.pricing_gate_blocked
+            )
+            logger.error(
+                "\n" + "!" * 70 + "\n"
+                f"  {len(self.pricing_gate_blocked)} SUBSCRIPTION(S) BLOCKED — "
+                f"included line(s) with NO Price Plan External ID (subs NEVER "
+                f"load with unpriced lines; the £0 book default would bill):\n"
+                f"{lines}\n"
+                f"  Fix: regenerate the subs + pricing exports so every included "
+                f"line carries its plan id, then re-run.\n" + "!" * 70
             )
 
         return records
@@ -261,12 +283,9 @@ class SubscriptionLoader(BaseLoader):
         # from NetSuite, no state tracker, no externalId/name lookups. A sub
         # whose customer has no resolvable C-number is skipped with an error;
         # never bound by any other key.
-        cnum = (
-            self._first_value(
-                rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"
-            )
-            or self.resolver.name_cnum(customer_name)
-        )
+        cnum = self._first_value(
+            rows, "NETSUITE_ACCOUNT_NUMBER", "NETSUITE_ACCOUNT_NUMBER_COMPANY_LEVEL"
+        ) or self.resolver.name_cnum(customer_name)
         customer_ns_id = self.resolver.resolve(cnum)
         if not customer_ns_id:
             logger.error(
@@ -452,6 +471,25 @@ class SubscriptionLoader(BaseLoader):
                 elif items_seen[name] is None and row_pp is not None:
                     # Backfill if the first row we saw had no PP but a later one does.
                     items_seen[name] = row_pp
+
+        # Pricing gate — MANDATORY (rule since 2026-07-15): a subscription is
+        # NEVER loaded with an included line that has no Price Plan External ID.
+        # Moorepay's standard price books are £0 placeholders, so such a line
+        # would silently bill at £0. Same posture as the mandatory-BA gate:
+        # error + skip the sub; fix the export (subs DDL must emit the plan id
+        # per line) and re-run.
+        unpriced = [name for name in items_order if items_seen[name] is None]
+        if unpriced:
+            msg = (
+                f"Subscription {raw_ext_id}: BLOCKED — {len(unpriced)} included "
+                f"line(s) have NO Price Plan External ID: {unpriced}. A "
+                f"subscription is NEVER loaded with unpriced lines (they would "
+                f"bill at the £0 book default). Regenerate the subs/pricing "
+                f"exports with a plan per line, then re-run."
+            )
+            logger.error(msg)
+            self.pricing_gate_blocked.append((raw_ext_id, unpriced))
+            return None
 
         items_to_include = [(name, items_seen[name]) for name in items_order]
         # Key _pending_lines on the revisioned ext_id so load_all (which iterates

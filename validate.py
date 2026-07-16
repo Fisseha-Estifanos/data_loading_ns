@@ -62,6 +62,7 @@ CHECK_ENTITY = {
     7: "subscription",
     8: "billingAccount",
     9: "subscription",
+    9.1: "subscription",
     10: "subscription",
     11: "subscription",
     12: "billingAccount",
@@ -72,7 +73,7 @@ CHECK_ENTITY = {
 # Severity each check emits. Used so a "not evaluated" finding (missing input)
 # carries the check's native severity — you can't confirm a BLOCKER check is
 # safe if its input is absent, so that absence must itself block.
-BLOCKER_CHECKS = {1, 2, 5, 5.1, 6, 7, 8, 9, 12, 13}
+BLOCKER_CHECKS = {1, 2, 5, 5.1, 6, 7, 8, 9, 9.1, 12, 13}
 
 # CSV inputs each check requires to produce a meaningful result. If any are
 # missing (None from _read_csv — a bad path in config), run() skips the check
@@ -97,6 +98,7 @@ CHECK_REQUIRED_CSVS = {
     7: {"subscription", "customer"},
     8: {"subscription", "billingAccount"},
     9: {"subscription"},
+    9.1: {"subscription"},
     10: {"subscription"},
     11: {"subscription", "pricing"},
     12: {"billingAccount"},
@@ -118,6 +120,7 @@ CHECK_GROUP = {
     7: "SUBSCRIPTIONS — subsidiary match",
     8: "BILLING ACCOUNTS — start dates",
     9: "SUBSCRIPTIONS — sales items",
+    9.1: "PRICE PLANS — every included line is priced (mandatory)",
     10: "PRICE PLANS — coverage (NS + pricing CSV)",
     11: "PRICE PLANS — coverage (NS + pricing CSV)",
     12: "BILLING ACCOUNTS — addresses & required fields",
@@ -136,6 +139,7 @@ CHECK_TITLE = {
     7: "Sub subsidiary == its customer's NS subsidiary",
     8: "BA startDate present and <= earliest sub Start Date for the deal",
     9: "Active sub line Sales Item is mapped (not blank / not NOT MAPPED)",
+    9.1: "Every included sub line carries a Price Plan External ID",
     10: "Sub line Price Plan External ID exists in NS",
     11: "Sub line Price Plan External ID exists in the pricing CSV",
     12: "BA customer has default billing AND shipping address in NS",
@@ -180,6 +184,11 @@ CHECK_EXPLAIN = {
     "A blank/late start breaks the subs it bills.",
     9: "Does every included sub line map to a real Sales Item (not blank / not "
     "'NOT MAPPED')? Unmapped lines are silently skipped at load.",
+    9.1: "Does every included line carry a Price Plan External ID (per item, "
+    "after the loader's same-item backfill)? The plan record holds ALL the "
+    "pricing — currency, min/max, price tiers — so a line with no plan bills "
+    "at the £0 book-default placeholder. BLOCKS: the loader refuses to load a "
+    "sub with unpriced lines (mirror of the mandatory-BA gate).",
     10: "Does each line's price plan already exist in NS? Warn = not loaded yet; "
     "the line would fall back to the price-book default.",
     11: "Does each line's price plan exist in the pricing CSV (i.e. CAN be "
@@ -585,9 +594,12 @@ class Validator:
         an unrelated company ("Care Shield Services Limited" vs "AMA Capital LLP").
         Returns True when it can't meaningfully compare (either side blank).
         """
+
         def norm(s: str) -> str:
             s = (s or "").lower()
-            s = re.sub(r"\b(limited|ltd|llp|plc|inc|co|company|group|services?)\b", " ", s)
+            s = re.sub(
+                r"\b(limited|ltd|llp|plc|inc|co|company|group|services?)\b", " ", s
+            )
             return re.sub(r"[^a-z0-9]", "", s)
 
         a, b = norm(sub_name), norm(ns_name)
@@ -1016,6 +1028,50 @@ class Validator:
                     f"Sales Item (those lines will be skipped).",
                 )
 
+    def check_9_1_line_has_price_plan(self):
+        """Check 9.1 (BLOCKER): every included line carries a Price Plan External ID.
+
+        The price plan record holds ALL the pricing (currency, pricePlanType,
+        minimum/maximumAmount, priceTiers) — the sub line only references it by
+        this external id. A line with no plan bills at the plan's price-book
+        default, and Moorepay's standard books are £0 placeholders — so an
+        unpriced line silently creates a £0 subscription line. The loader
+        refuses to load such subs (pricing gate, mirror of the mandatory-BA
+        gate); this check surfaces them pre-load.
+
+        Replicates the loader's per-item semantics so it never false-blocks:
+        rows are deduped by Sales Item name, and a blank Price Plan External ID
+        on one row is backfilled from a later row with the same item name.
+        Only items whose FINAL plan is still blank are reported — one finding
+        per sub, listing the unpriced item names.
+        """
+        for ext, grp in self.sub_groups.items():
+            items_seen: dict = {}
+            items_order: list = []
+            for row in grp:
+                if (row.get("Lines: Include") or "").strip() != "T":
+                    continue
+                item = (row.get("Sales Item") or "").strip().replace("​", "")
+                if not item or item == "NOT MAPPED":
+                    continue  # check 9 owns unmapped items
+                row_pp = (row.get("Price Plan External ID") or "").strip() or None
+                if item not in items_seen:
+                    items_seen[item] = row_pp
+                    items_order.append(item)
+                elif items_seen[item] is None and row_pp is not None:
+                    items_seen[item] = row_pp
+            unpriced = [i for i in items_order if items_seen[i] is None]
+            if unpriced:
+                self.add(
+                    9.1,
+                    BLOCKER,
+                    ext,
+                    f"{len(unpriced)} included line(s) have NO Price Plan "
+                    f"External ID: {unpriced} — would bill at the £0 book "
+                    f"default; the loader refuses to load this sub. Regenerate "
+                    f"the subs/pricing exports with a plan per line.",
+                )
+
     def check_10_price_plan(self):
         """Check 10 (WARNING): each line's price plan exists in NS.
 
@@ -1282,12 +1338,8 @@ class Validator:
             # For check 6: which `<sub>_BA` billing accounts already exist in NS.
             # Per SUB (the sub links to its BA by `<sub External ID>_BA` — the
             # `<deal>_<subid>_BA` convention, since 2026-07-09).
-            ba_extids = {
-                config.apply_revision(f"{e}_BA") for e in self.sub_groups
-            }
-            print(
-                f"  · querying NS for {len(ba_extids)} `<sub>_BA` externalIds…"
-            )
+            ba_extids = {config.apply_revision(f"{e}_BA") for e in self.sub_groups}
+            print(f"  · querying NS for {len(ba_extids)} `<sub>_BA` externalIds…")
             self._fetch_ns_ba_extids(ba_extids)
 
         if needs_priceplans:
@@ -1337,6 +1389,7 @@ class Validator:
             7: self.check_7_subsidiary,
             8: self.check_8_startdates,
             9: self.check_9_sales_item,
+            9.1: self.check_9_1_line_has_price_plan,
             10: self.check_10_price_plan,
             11: self.check_11_price_plan_csv,
             12: self.check_12_addresses,

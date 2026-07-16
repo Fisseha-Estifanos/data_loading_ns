@@ -77,6 +77,39 @@ def pricing_plan_ids(pricing_rows):
     }
 
 
+def unpriced_lines(subs_rows):
+    """Per sub: included Sales Items whose Price Plan External ID is blank.
+
+    Mirrors the loader's pricing gate (and validate.py check 9.1): rows are
+    grouped by sub `External ID`, deduped by Sales Item name, and a blank plan
+    on one row is backfilled from a later row with the same item name. Items
+    whose FINAL plan is still blank are returned as {sub_ext: [item, ...]}.
+    These lines would bill at the £0 book default — the loader refuses them.
+    """
+    per_sub: dict = {}
+    order: dict = {}
+    for r in subs_rows:
+        if (r.get("Lines: Include") or "").strip() != "T":
+            continue
+        ext = (r.get("External ID") or "").strip()
+        item = (r.get("Sales Item") or "").strip().replace("​", "")
+        if not ext or not item or item == "NOT MAPPED":
+            continue
+        pp = (r.get("Price Plan External ID") or "").strip() or None
+        seen = per_sub.setdefault(ext, {})
+        order.setdefault(ext, [])
+        if item not in seen:
+            seen[item] = pp
+            order[ext].append(item)
+        elif seen[item] is None and pp is not None:
+            seen[item] = pp
+    return {
+        ext: [i for i in order[ext] if per_sub[ext][i] is None]
+        for ext in per_sub
+        if any(per_sub[ext][i] is None for i in per_sub[ext])
+    }
+
+
 def run_coverage_gate(quiet: bool = False) -> int:
     """Print the coverage report and return an exit code (0 PASS / 1 FAIL).
 
@@ -98,6 +131,7 @@ def run_coverage_gate(quiet: bool = False) -> int:
     have = pricing_plan_ids(pricing_rows)
     missing = sorted(refs - have)
     covered = len(refs) - len(missing)
+    unpriced = unpriced_lines(subs_rows)
 
     print("=" * 72)
     print("PRICING COVERAGE CHECK")
@@ -107,6 +141,10 @@ def run_coverage_gate(quiet: bool = False) -> int:
     print(f"  price plans referenced by included sub lines : {len(refs)}")
     print(f"  distinct plans present in the pricing CSV    : {len(have)}")
     print(f"  covered                                      : {covered}/{len(refs)}")
+    print(
+        f"  included lines with NO price plan at all     : "
+        f"{sum(len(v) for v in unpriced.values())}"
+    )
 
     # Loud signal: the pricing CSV dwarfs what the subs need → looks unscoped.
     if refs and len(have) >= UNSCOPED_RATIO * len(refs):
@@ -118,6 +156,19 @@ def run_coverage_gate(quiet: bool = False) -> int:
             f"DDL scoped to this batch's deals."
         )
 
+    if unpriced:
+        n_lines = sum(len(v) for v in unpriced.values())
+        print(
+            f"\n  ✗ {n_lines} included line(s) across {len(unpriced)} sub(s) "
+            f"have NO Price Plan External ID — they would bill at the £0 book "
+            f"default; the loader refuses to load these subs. Regenerate the "
+            f"subs/pricing exports with a plan per line:"
+        )
+        if not quiet:
+            for ext, items in sorted(unpriced.items()):
+                for item in items:
+                    print(f"      {ext}  →  {item}")
+
     if missing:
         print(
             f"\n  ✗ {len(missing)} referenced price plan(s) have NO row in the "
@@ -127,13 +178,28 @@ def run_coverage_gate(quiet: bool = False) -> int:
         if not quiet:
             for m in missing:
                 print(f"      {m}")
+
+    if missing or unpriced:
+        parts = []
+        if missing:
+            parts.append(f"{len(missing)}/{len(refs)} plans uncovered")
+        if unpriced:
+            parts.append(
+                f"{sum(len(v) for v in unpriced.values())} line(s) with no plan"
+            )
         print("\n" + "-" * 72)
-        print(f"RESULT: ✗ FAIL — {len(missing)}/{len(refs)} plans uncovered.")
+        print(f"RESULT: ✗ FAIL — {'; '.join(parts)}.")
         print("-" * 72)
         return 1
 
     print("\n" + "-" * 72)
-    print(f"RESULT: ✓ PASS — all {len(refs)} referenced plans present.")
+    if refs:
+        print(f"RESULT: ✓ PASS — all {len(refs)} referenced plans present.")
+    else:
+        print(
+            "RESULT: ✓ PASS (vacuous) — 0 plans referenced and 0 unpriced "
+            "lines; there was no pricing to validate."
+        )
     print("-" * 72)
     return 0
 
